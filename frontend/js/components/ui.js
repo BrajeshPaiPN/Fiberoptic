@@ -9,6 +9,7 @@ export class UIManager {
         this.bomContent = document.getElementById('bom-content');
         this.obsStatus = document.getElementById('obstacle-status');
         this.historyList = document.getElementById('history-list');
+        this.btnExport = document.getElementById('btn-export');
     }
 
     setWorking(text) {
@@ -38,16 +39,44 @@ export class UIManager {
         }
     }
 
-    showBOM(paths) {
-        let totalSegments = 0;
-        paths.forEach(pList => totalSegments += pList.length);
-        
+    showBOM(bomData) {
+        let warningHtml = '';
+        if (bomData.opticalLoss > 28) {
+            warningHtml = `
+                <div style="background: rgba(239, 68, 68, 0.2); border: 1px solid var(--danger); padding: 0.8rem; border-radius: 6px; margin-top: 1rem;">
+                    <strong style="color: var(--danger);">[WARNING] Optical Loss Threshold Exceeded</strong>
+                    <p style="font-size: 0.85rem; margin-top: 0.4rem;">
+                        Estimated optical loss is ${bomData.opticalLoss} dB, exceeding the standard GPON 28 dB limit. Consider adding more splitters or repeating the signal.
+                    </p>
+                </div>
+            `;
+        }
+
         this.bomContent.innerHTML = `
             <div style="padding: 1rem; background: rgba(0,0,0,0.3); border-radius: 8px;">
-                <p><strong>Route Calculation Complete!</strong></p>
-                <p style="color: var(--text-muted); margin-top: 0.5rem; font-size: 0.9rem;">
-                   Successfully calculated ${paths.length} network paths containing ${totalSegments} segments.
-                </p>
+                <p><strong>Bill of Materials & Cost</strong></p>
+                <table style="width: 100%; margin-top: 0.8rem; font-size: 0.85rem; border-collapse: collapse;">
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 4px 0;">Fiber Optic Cable (${bomData.totalDistanceMeters}m)</td>
+                        <td style="text-align: right; padding: 4px 0;">$${bomData.fiberCost.toLocaleString()}</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 4px 0;">Splitter Hubs (${bomData.hubCount})</td>
+                        <td style="text-align: right; padding: 4px 0;">$${bomData.hubCost.toLocaleString()}</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 4px 0;">Client Terminations (${bomData.clientCount})</td>
+                        <td style="text-align: right; padding: 4px 0;">$${bomData.clientCost.toLocaleString()}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px 0; font-weight: bold; color: var(--success);">Total CAPEX</td>
+                        <td style="text-align: right; padding: 8px 0; font-weight: bold; color: var(--success);">$${bomData.totalCost.toLocaleString()}</td>
+                    </tr>
+                </table>
+                <div style="margin-top: 1rem; font-size: 0.85rem;">
+                    <strong>Optical Loss Estimate:</strong> ${bomData.opticalLoss} dB
+                </div>
+                ${warningHtml}
             </div>
         `;
         this.bomSection.style.display = 'block';
