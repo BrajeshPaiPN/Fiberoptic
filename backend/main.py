@@ -1,5 +1,13 @@
 import os
+import sys
 import subprocess
+
+# Ensure the backend directory is on sys.path so `database` package resolves
+# regardless of whether we run from the project root or the backend folder
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
