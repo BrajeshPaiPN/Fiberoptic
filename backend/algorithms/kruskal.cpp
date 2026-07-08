@@ -1,11 +1,10 @@
-// Kruskal's MST with WEIGHTED terrain grid
-// Uses A* with float weights to find edge costs between all node pairs
+// Kruskal's MST — Priority Queue A* (O(n log n) per pair), C++11 compatible
+// Uses accurate terrain-cost A* for edge weights, path-compression Union-Find
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <queue>
 #include <unordered_map>
-#include <unordered_set>
-#include <string>
 #include <algorithm>
 #include <limits>
 
@@ -13,108 +12,118 @@ using namespace std;
 
 struct Node { int x, y; };
 
-class AStarPathfinder {
-private:
-    vector<vector<float>> grid;
-    int resolution;
-    int dx[8]      = {0, 1, 0, -1,  1,  1, -1, -1};
-    int dy[8]      = {1, 0, -1, 0,  1, -1,  1, -1};
-    double base[8] = {1.0, 1.0, 1.0, 1.0, 1.414, 1.414, 1.414, 1.414};
+struct PQNode {
+    double f;
+    int x, y;
+    bool operator>(const PQNode& o) const { return f > o.f; }
+};
 
-    double heuristic(int x1, int y1, int x2, int y2) {
-        return hypot(x1-x2, y1-y2);
+static const int DX[8]     = {0, 1, 0, -1,  1,  1, -1, -1};
+static const int DY[8]     = {1, 0, -1, 0,  1, -1,  1, -1};
+static const double BASE[8] = {1.0,1.0,1.0,1.0, 1.4142,1.4142,1.4142,1.4142};
+
+inline double heuristic(int x1,int y1,int x2,int y2) {
+    int dx=x1-x2, dy=y1-y2;
+    return sqrt((double)(dx*dx+dy*dy));
+}
+
+vector<Node> reconstructPath(const unordered_map<int,int>& came, int cur, int res) {
+    vector<Node> path;
+    while (came.count(cur)) {
+        path.push_back({ cur%res, cur/res });
+        cur = came.at(cur);
     }
-    string nodeStr(int x, int y) { return to_string(x)+","+to_string(y); }
+    path.push_back({ cur%res, cur/res });
+    reverse(path.begin(), path.end());
+    return path;
+}
 
-    vector<Node> reconstructPath(unordered_map<string,string>& came, string cur) {
-        vector<Node> path;
-        size_t c = cur.find(',');
-        path.push_back({stoi(cur.substr(0,c)), stoi(cur.substr(c+1))});
-        while (came.count(cur)) {
-            cur = came[cur];
-            c = cur.find(',');
-            path.insert(path.begin(), {stoi(cur.substr(0,c)), stoi(cur.substr(c+1))});
-        }
-        return path;
-    }
+// Returns {path, g_cost}. path is empty if unreachable.
+pair<vector<Node>, double> findPath(const vector<vector<float> >& grid, int res, Node start, Node end) {
+    int N    = res*res;
+    int sIdx = start.y*res + start.x;
+    int eIdx = end.y  *res + end.x;
 
-public:
-    AStarPathfinder(vector<vector<float>> g, int res) : grid(g), resolution(res) {}
+    vector<double>  gScore(N, numeric_limits<double>::infinity());
+    vector<bool>    closed(N, false);
+    unordered_map<int,int> came;
 
-    vector<Node> findPath(Node start, Node end) {
-        unordered_set<string> open, closed;
-        unordered_map<string,double> g_score, f_score;
-        unordered_map<string,string> came;
+    priority_queue<PQNode, vector<PQNode>, greater<PQNode> > pq;
+    gScore[sIdx] = 0.0;
+    PQNode s; s.f = heuristic(start.x,start.y,end.x,end.y); s.x=start.x; s.y=start.y;
+    pq.push(s);
 
-        string startStr = nodeStr(start.x, start.y);
-        open.insert(startStr);
-        g_score[startStr] = 0;
-        f_score[startStr] = heuristic(start.x, start.y, end.x, end.y);
+    while (!pq.empty()) {
+        PQNode top = pq.top(); pq.pop();
+        int cx = top.x, cy = top.y;
+        int curIdx = cy*res + cx;
 
-        while (!open.empty()) {
-            string cur = "";
-            double lowestF = numeric_limits<double>::infinity();
-            for (const string& s : open) {
-                double f = f_score.count(s) ? f_score[s] : numeric_limits<double>::infinity();
-                if (f < lowestF) { lowestF = f; cur = s; }
+        if (closed[curIdx]) continue;
+        closed[curIdx] = true;
+
+        if (curIdx == eIdx)
+            return make_pair(reconstructPath(came, eIdx, res), gScore[eIdx]);
+
+        for (int i=0; i<8; i++) {
+            int nx=cx+DX[i], ny=cy+DY[i];
+            if (nx<0||nx>=res||ny<0||ny>=res) continue;
+
+            float w = grid[ny][nx];
+            if (w <= 0.0f) continue;
+
+            if (DX[i]!=0 && DY[i]!=0) {
+                if (grid[cy][nx]<=0.0f || grid[ny][cx]<=0.0f) continue;
             }
 
-            size_t c = cur.find(',');
-            int cx = stoi(cur.substr(0,c)), cy = stoi(cur.substr(c+1));
+            int nIdx = ny*res + nx;
+            if (closed[nIdx]) continue;
 
-            if (cx == end.x && cy == end.y)
-                return reconstructPath(came, cur);
-
-            open.erase(cur);
-            closed.insert(cur);
-
-            for (int i = 0; i < 8; i++) {
-                int nx = cx+dx[i], ny = cy+dy[i];
-                if (nx<0||nx>=resolution||ny<0||ny>=resolution) continue;
-
-                float cellWeight = grid[ny][nx];
-                if (cellWeight <= 0.0f) continue;
-
-                if (dx[i]!=0 && dy[i]!=0) {
-                    if (grid[cy][nx]<=0.0f || grid[ny][cx]<=0.0f) continue;
-                }
-
-                string nStr = nodeStr(nx, ny);
-                if (closed.count(nStr)) continue;
-
-                double moveCost = base[i] * cellWeight;
-                double tentG = (g_score.count(cur) ? g_score[cur] : numeric_limits<double>::infinity()) + moveCost;
-
-                if (!open.count(nStr)) {
-                    open.insert(nStr);
-                } else if (tentG >= (g_score.count(nStr) ? g_score[nStr] : numeric_limits<double>::infinity())) {
-                    continue;
-                }
-
-                came[nStr] = cur;
-                g_score[nStr] = tentG;
-                f_score[nStr] = tentG + heuristic(nx, ny, end.x, end.y);
+            double tentG = gScore[curIdx] + BASE[i]*(double)w;
+            if (tentG < gScore[nIdx]) {
+                came[nIdx]   = curIdx;
+                gScore[nIdx] = tentG;
+                PQNode nn;
+                nn.f = tentG + heuristic(nx,ny,end.x,end.y);
+                nn.x = nx; nn.y = ny;
+                pq.push(nn);
             }
         }
-        return {};
+    }
+    return make_pair(vector<Node>(), numeric_limits<double>::infinity());
+}
+
+// Union-Find with path compression + union-by-rank
+struct DisjointSet {
+    vector<int> parent, rank_;
+    DisjointSet(int n) : parent(n), rank_(n,0) {
+        for(int i=0;i<n;i++) parent[i]=i;
+    }
+    int find(int i) {
+        while (parent[i]!=i) { parent[i]=parent[parent[i]]; i=parent[i]; }
+        return i;
+    }
+    bool unite(int a, int b) {
+        int ra=find(a), rb=find(b);
+        if (ra==rb) return false;
+        if (rank_[ra]<rank_[rb]) swap(ra,rb);
+        parent[rb]=ra;
+        if (rank_[ra]==rank_[rb]) rank_[ra]++;
+        return true;
     }
 };
 
-class DisjointSet {
-    vector<int> parent;
-public:
-    DisjointSet(int n) { parent.resize(n); for(int i=0;i<n;i++) parent[i]=i; }
-    int find(int i) { return parent[i]==i ? i : parent[i]=find(parent[i]); }
-    bool unite(int i, int j) {
-        int ri=find(i), rj=find(j);
-        if(ri!=rj){ parent[ri]=rj; return true; }
-        return false;
-    }
+struct Edge {
+    int u, v;
+    double cost;
+    vector<Node> path;
 };
 
-struct Edge { int u, v; double cost; vector<Node> path; };
+bool edgeLess(const Edge& a, const Edge& b) { return a.cost < b.cost; }
 
 int main() {
+    ios::sync_with_stdio(false);
+    cin.tie(NULL);
+
     int resolution;
     if (!(cin >> resolution)) return 0;
 
@@ -123,38 +132,54 @@ int main() {
     vector<Node> nodes(numNodes);
     for (int i=0;i<numNodes;i++) cin >> nodes[i].x >> nodes[i].y;
 
-    vector<vector<float>> grid(resolution, vector<float>(resolution));
+    vector<vector<float> > grid(resolution, vector<float>(resolution));
     for (int y=0;y<resolution;y++)
         for (int x=0;x<resolution;x++)
             cin >> grid[y][x];
 
-    AStarPathfinder pf(grid, resolution);
+    // Build complete graph using A* terrain-cost paths
     vector<Edge> edges;
+    edges.reserve(numNodes*(numNodes-1)/2);
 
     for (int i=0;i<numNodes;i++) {
         for (int j=i+1;j<numNodes;j++) {
-            vector<Node> path = pf.findPath(nodes[i], nodes[j]);
-            if (!path.empty())
-                edges.push_back({i, j, (double)path.size(), path});
+            pair<vector<Node>,double> result = findPath(grid, resolution, nodes[i], nodes[j]);
+            vector<Node>& path = result.first;
+            double cost        = result.second;
+            if (!path.empty()) {
+                Edge e;
+                e.u    = i;
+                e.v    = j;
+                e.cost = cost;
+                e.path = path;
+                edges.push_back(e);
+            }
         }
     }
 
-    sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b){ return a.cost<b.cost; });
+    // Kruskal's MST — sort edges by terrain cost, greedily add non-cycle edges
+    sort(edges.begin(), edges.end(), edgeLess);
 
     DisjointSet ds(numNodes);
-    vector<vector<Node>> mstPaths;
-    for (const auto& e : edges)
-        if (ds.unite(e.u, e.v))
-            mstPaths.push_back(e.path);
+    vector<vector<Node> > mstPaths;
+    mstPaths.reserve(numNodes-1);
+
+    for (int k=0; k<(int)edges.size(); k++) {
+        if (ds.unite(edges[k].u, edges[k].v)) {
+            mstPaths.push_back(edges[k].path);
+            if ((int)mstPaths.size() == numNodes-1) break;  // MST complete
+        }
+    }
 
     if (mstPaths.empty()) {
         cout << "NOPATH\n";
     } else {
         cout << mstPaths.size() << "\n";
-        for (const auto& path : mstPaths) {
+        for (int p=0; p<(int)mstPaths.size(); p++) {
+            const vector<Node>& path = mstPaths[p];
             cout << path.size() << "\n";
-            for (const auto& p : path)
-                cout << p.x << " " << p.y << " ";
+            for (int n=0; n<(int)path.size(); n++)
+                cout << path[n].x << " " << path[n].y << " ";
             cout << "\n";
         }
     }

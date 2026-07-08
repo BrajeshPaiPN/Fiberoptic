@@ -6,7 +6,7 @@ import { MapManager }  from './components/map.js?v=11';
 import { UIManager }   from './components/ui.js?v=11';
 import { calculateRoute, getHistory, getHistoryDetail, deleteHistory, geocodeAddress, getStats } from './api.js?v=11';
 
-const RESOLUTION = 100;
+const RESOLUTION = 150;  // 150x150 grid — finer accuracy, still fast with PQ-based A*
 
 // ── Obstacle weights ─────────────────────────────────────────────────────────
 // moveCost in A* = base × cellWeight → LOWER weight = CHEAPER = preferred
@@ -83,17 +83,31 @@ function pointInPolygon(px, py, polygon) {
     return inside;
 }
 
-// ── Grid rasterizer ───────────────────────────────────────────────────────────
+// ── Grid rasterizer (accurate: checks cell corners + centre) ─────────────────
 function rasterizeFeatures(features, bounds) {
     const grid    = buildDefaultGrid();
     const latSpan = bounds.north - bounds.south;
     const lngSpan = bounds.east  - bounds.west;
 
+    // Convert lat/lng to fractional grid coords
     function toGrid(lat, lng) {
         return [
             ((lng - bounds.west)  / lngSpan) * RESOLUTION,
             ((lat - bounds.south) / latSpan) * RESOLUTION,
         ];
+    }
+
+    // Bresenham line fill between two grid points (for road centre-lines)
+    function bresenham(x0,y0,x1,y1, fn) {
+        let ddx=Math.abs(x1-x0), ddy=Math.abs(y1-y0);
+        let sx=x0<x1?1:-1, sy=y0<y1?1:-1, err=ddx-ddy;
+        while (true) {
+            fn(x0,y0);
+            if (x0===x1&&y0===y1) break;
+            let e2=2*err;
+            if (e2>-ddy){err-=ddy;x0+=sx;}
+            if (e2< ddx){err+=ddx;y0+=sy;}
+        }
     }
 
     features.forEach(f => {
@@ -107,68 +121,81 @@ function rasterizeFeatures(features, bounds) {
 
             rings.forEach(ring => {
                 const gridRing = ring.map(([lng, lat]) => toGrid(lat, lng));
-                let minGx = Infinity, maxGx = -Infinity, minGy = Infinity, maxGy = -Infinity;
-                for (const [gx, gy] of gridRing) {
-                    if (gx < minGx) minGx = gx; if (gx > maxGx) maxGx = gx;
-                    if (gy < minGy) minGy = gy; if (gy > maxGy) maxGy = gy;
-                }
-                const x0 = Math.max(0, Math.floor(minGx)), x1 = Math.min(RESOLUTION - 1, Math.ceil(maxGx));
-                const y0 = Math.max(0, Math.floor(minGy)), y1 = Math.min(RESOLUTION - 1, Math.ceil(maxGy));
-                if (x1 < x0 || y1 < y0) return;
 
-                for (let gy = y0; gy <= y1; gy++) {
-                    for (let gx = x0; gx <= x1; gx++) {
-                        if (pointInPolygon(gx + 0.5, gy + 0.5, gridRing)) {
-                            if (type === 'building' || type === 'water') grid[gy][gx] = W.BLOCKED;
+                // Bounding box in grid space
+                let minGx=Infinity,maxGx=-Infinity,minGy=Infinity,maxGy=-Infinity;
+                for (const [gx,gy] of gridRing) {
+                    if(gx<minGx)minGx=gx; if(gx>maxGx)maxGx=gx;
+                    if(gy<minGy)minGy=gy; if(gy>maxGy)maxGy=gy;
+                }
+                const x0=Math.max(0,Math.floor(minGx)), x1=Math.min(RESOLUTION-1,Math.ceil(maxGx));
+                const y0=Math.max(0,Math.floor(minGy)), y1=Math.min(RESOLUTION-1,Math.ceil(maxGy));
+                if (x1<x0||y1<y0) return;
+
+                // For each candidate cell, test CENTRE and all 4 CORNERS
+                // A cell is inside the polygon if its centre OR any corner is inside
+                for (let gy=y0; gy<=y1; gy++) {
+                    for (let gx=x0; gx<=x1; gx++) {
+                        // Test 5 sample points: centre + 4 corners
+                        const samples = [
+                            [gx+0.5, gy+0.5],  // centre
+                            [gx+0.1, gy+0.1],  // bottom-left
+                            [gx+0.9, gy+0.1],  // bottom-right
+                            [gx+0.1, gy+0.9],  // top-left
+                            [gx+0.9, gy+0.9],  // top-right
+                        ];
+                        const inside = samples.some(([px,py]) => pointInPolygon(px, py, gridRing));
+                        if (inside && (type==='building'||type==='water')) {
+                            grid[gy][gx] = W.BLOCKED;
                         }
                     }
                 }
 
+                // Building edge halo (mark adjacent open cells as expensive)
                 if (type === 'building') {
                     const border = [];
-                    const sx0 = Math.max(0, x0 - 1), sx1 = Math.min(RESOLUTION - 1, x1 + 1);
-                    const sy0 = Math.max(0, y0 - 1), sy1 = Math.min(RESOLUTION - 1, y1 + 1);
-                    for (let gy = sy0; gy <= sy1; gy++) {
-                        for (let gx = sx0; gx <= sx1; gx++) {
-                            if (grid[gy][gx] === W.BLOCKED) {
-                                for (let dy = -1; dy <= 1; dy++) {
-                                    for (let dx = -1; dx <= 1; dx++) {
-                                        const nx = gx + dx, ny = gy + dy;
-                                        if (nx >= 0 && nx < RESOLUTION && ny >= 0 && ny < RESOLUTION && grid[ny][nx] !== W.BLOCKED)
-                                            border.push([nx, ny]);
-                                    }
+                    const sx0=Math.max(0,x0-2), sx1=Math.min(RESOLUTION-1,x1+2);
+                    const sy0=Math.max(0,y0-2), sy1=Math.min(RESOLUTION-1,y1+2);
+                    for (let gy=sy0; gy<=sy1; gy++) {
+                        for (let gx=sx0; gx<=sx1; gx++) {
+                            if (grid[gy][gx]===W.BLOCKED) {
+                                for (let dy=-2; dy<=2; dy++) for (let dx=-2; dx<=2; dx++) {
+                                    const nx=gx+dx, ny=gy+dy;
+                                    if (nx>=0&&nx<RESOLUTION&&ny>=0&&ny<RESOLUTION
+                                        && grid[ny][nx]!==W.BLOCKED)
+                                        border.push([nx,ny]);
                                 }
                             }
                         }
                     }
-                    border.forEach(([nx, ny]) => { if (grid[ny][nx] !== W.BLOCKED) grid[ny][nx] = W.BUILDING_EDGE; });
+                    // Mark building edges as high-cost (routes avoid them)
+                    border.forEach(([nx,ny]) => {
+                        if (grid[ny][nx]!==W.BLOCKED) grid[ny][nx] = W.BUILDING_EDGE;
+                    });
                 }
             });
         }
 
         if (geom.type === 'LineString' && type === 'road') {
             const coords = geom.coordinates;
-            for (let i = 0; i < coords.length - 1; i++) {
-                const [gx0f, gy0f] = toGrid(coords[i][1],   coords[i][0]);
-                const [gx1f, gy1f] = toGrid(coords[i+1][1], coords[i+1][0]);
-                let x0 = Math.round(gx0f), y0 = Math.round(gy0f);
-                let x1 = Math.round(gx1f), y1 = Math.round(gy1f);
-                let ddx = Math.abs(x1 - x0), ddy = Math.abs(y1 - y0);
-                let sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = ddx - ddy;
-                while (true) {
-                    if (x0 >= 0 && x0 < RESOLUTION && y0 >= 0 && y0 < RESOLUTION) {
-                        if (grid[y0][x0] !== W.BLOCKED) grid[y0][x0] = W.ROAD;
-                        for (let rdy = -1; rdy <= 1; rdy++) for (let rdx = -1; rdx <= 1; rdx++) {
-                            const rx = x0 + rdx, ry = y0 + rdy;
-                            if (rx >= 0 && rx < RESOLUTION && ry >= 0 && ry < RESOLUTION && grid[ry][rx] === W.OPEN)
-                                grid[ry][rx] = W.ROAD_BUFFER;
+            for (let i=0; i<coords.length-1; i++) {
+                const [gx0f,gy0f] = toGrid(coords[i][1],   coords[i][0]);
+                const [gx1f,gy1f] = toGrid(coords[i+1][1], coords[i+1][0]);
+                const rx0=Math.round(gx0f), ry0=Math.round(gy0f);
+                const rx1=Math.round(gx1f), ry1=Math.round(gy1f);
+
+                bresenham(rx0,ry0,rx1,ry1, (gx,gy) => {
+                    if (gx>=0&&gx<RESOLUTION&&gy>=0&&gy<RESOLUTION) {
+                        if (grid[gy][gx]!==W.BLOCKED) grid[gy][gx] = W.ROAD;
+                        // Road buffer (1-cell wide halo around roads)
+                        for (let dy=-1; dy<=1; dy++) for (let dx=-1; dx<=1; dx++) {
+                            const nx=gx+dx, ny=gy+dy;
+                            if (nx>=0&&nx<RESOLUTION&&ny>=0&&ny<RESOLUTION
+                                && grid[ny][nx]===W.OPEN)
+                                grid[ny][nx] = W.ROAD_BUFFER;
                         }
                     }
-                    if (x0 === x1 && y0 === y1) break;
-                    const e2 = 2 * err;
-                    if (e2 > -ddy) { err -= ddy; x0 += sx; }
-                    if (e2 <  ddx) { err += ddx; y0 += sy; }
-                }
+                });
             }
         }
     });
@@ -612,19 +639,46 @@ document.addEventListener('DOMContentLoaded', async () => {
         const algorithm = document.querySelector('input[name="algorithm"]:checked').value;
         const mapBounds = map.getBoundsObj();
 
-        if (currentFeatures.length > 0) {
-            const b = currentBounds;
-            const moved = !b
-                || Math.abs(mapBounds.north - b.north) > 1e-6 || Math.abs(mapBounds.south - b.south) > 1e-6
-                || Math.abs(mapBounds.east  - b.east)  > 1e-6 || Math.abs(mapBounds.west  - b.west)  > 1e-6;
-            if (moved) {
+        // ── Auto-fetch obstacles if not already loaded ────────────────────────
+        // Obstacles are REQUIRED for accurate routing — auto-fetch if missing
+        // or if the map has panned/zoomed significantly since the last fetch.
+        const needFetch = currentFeatures.length === 0;
+        const moved = !needFetch && currentBounds && (
+            Math.abs(mapBounds.north - currentBounds.north) > 1e-6 ||
+            Math.abs(mapBounds.south - currentBounds.south) > 1e-6 ||
+            Math.abs(mapBounds.east  - currentBounds.east)  > 1e-6 ||
+            Math.abs(mapBounds.west  - currentBounds.west)  > 1e-6
+        );
+
+        if (needFetch || moved) {
+            if (needFetch)
+                ui.toast('No obstacles loaded — auto-fetching from OSM…', 'info', 3500);
+            else
+                ui.toast('Map moved — re-fetching obstacles for new view…', 'info', 3000);
+
+            ui.showLoading('Fetching obstacles from OpenStreetMap…');
+            try {
+                const osmData = await fetchOSMObstacles(mapBounds, ui);
+                if (osmData) {
+                    currentFeatures   = overpassToFeatures(osmData);
+                    currentBounds     = mapBounds;
+                    currentWeightGrid = rasterizeFeatures(currentFeatures, currentBounds);
+                    map.drawObstacles(currentFeatures);
+                    const bCount = currentFeatures.filter(f => f.properties.type === 'building').length;
+                    const rCount = currentFeatures.filter(f => f.properties.type === 'road').length;
+                    document.getElementById('obstacle-status').textContent =
+                        `${bCount} buildings · ${rCount} roads (auto-fetched)`;
+                    ui.toast(`Obstacles loaded: ${bCount} buildings, ${rCount} roads`, 'success');
+                }
+            } catch (err) {
+                ui.toast('Failed to fetch obstacles — using open grid', 'warning');
                 currentBounds     = mapBounds;
-                currentWeightGrid = rasterizeFeatures(currentFeatures, currentBounds);
-                map.drawObstacles(currentFeatures);
+                currentWeightGrid = buildDefaultGrid();
+            } finally {
+                ui.hideLoading();
             }
-        } else {
-            currentBounds = mapBounds;
         }
+
 
         const bounds  = currentBounds;
         const latStep = (bounds.north - bounds.south) / RESOLUTION;
