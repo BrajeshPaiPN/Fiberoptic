@@ -79,17 +79,19 @@ public:
                 float cellWeight = grid[ny][nx];
                 if (cellWeight <= 0.0f) continue;  // impassable (building, water)
 
-                // Prevent corner-cutting through diagonally-adjacent obstacles
+                // Terrain cost: lower cellWeight = lower moveCost = preferred path
+                // Roads=0.7 (cheap/preferred), Open=1.0 (baseline), BldgEdge=5.0 (expensive/avoided)
+                // Blocked=0.0 is filtered above
+                // Prevent corner-cutting through EITHER adjacent obstacle (|| not &&)
                 if (dx[i] != 0 && dy[i] != 0) {
-                    if (grid[cy][nx] <= 0.0f && grid[ny][cx] <= 0.0f) continue;
+                    if (grid[cy][nx] <= 0.0f || grid[ny][cx] <= 0.0f) continue;
                 }
 
                 string nStr = nodeStr(nx, ny);
                 if (closed.count(nStr)) continue;
 
-                // Terrain cost = base movement cost * (1 / cellWeight)
-                // Low cellWeight = high cost (roads are 0.7 so cost = 1/0.7 ≈ 1.43 → preferred over open land)
-                // We invert: road at 1.5 means PREFERRED (lower cost), building_edge at 8.0 means PENALTY
+                // Terrain cost = base movement cost * cellWeight
+                // Low cellWeight = lower cost (roads are 0.7 so cost = 1.0*0.7 = 0.7 → preferred over open land)
                 double moveCost = base[i] * cellWeight;
                 double tentG = (g_score.count(cur) ? g_score[cur] : numeric_limits<double>::infinity()) + moveCost;
 

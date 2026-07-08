@@ -8,13 +8,18 @@ import { calculateRoute, getHistory, getHistoryDetail, deleteHistory, geocodeAdd
 
 const RESOLUTION = 100;
 
-// ── Obstacle weights ──────────────────────────────────────────────────────────
+// ── Obstacle weights ─────────────────────────────────────────────────────────
+// moveCost in A* = base × cellWeight → LOWER weight = CHEAPER = preferred
+//   Roads     0.7  → cheaper than open → fiber follows roads   ✓
+//   Open      1.0  → baseline                                  ✓
+//   BldgEdge  5.0  → expensive → routes AVOID building edges   ✓  (was 0.05 → BUG: routes went INTO buildings)
+//   Blocked   0.0  → impassable                                ✓
 const W = {
     ROAD:          0.7,
     ROAD_BUFFER:   0.85,
     OPEN:          1.0,
-    BUILDING_EDGE: 0.05,
-    BLOCKED:       0.0,
+    BUILDING_EDGE: 5.0,   // HIGH cost = routes avoid building perimeters
+    BLOCKED:       0.0,   // impassable
 };
 
 // ── Cost model (per metre, terrain-aware) ─────────────────────────────────────
@@ -635,7 +640,29 @@ document.addEventListener('DOMContentLoaded', async () => {
             label: n.label,
         }));
 
-        gridNodes.forEach(n => { currentWeightGrid[n.y][n.x] = W.OPEN; });
+        // ── Node clearance: open a 7×7 neighbourhood around every node ────────
+        // This guarantees A* can always expand from a node even if the user
+        // placed it inside a building footprint. The clearance fades from ROAD
+        // (preferred, centre 1×1) → OPEN (neutral, inner ring) → leave outer
+        // cells alone only if they were already open.
+        gridNodes.forEach(n => {
+            for (let dy = -3; dy <= 3; dy++) {
+                for (let dx = -3; dx <= 3; dx++) {
+                    const nx = Math.max(0, Math.min(RESOLUTION - 1, n.x + dx));
+                    const ny = Math.max(0, Math.min(RESOLUTION - 1, n.y + dy));
+                    const dist = Math.max(Math.abs(dx), Math.abs(dy)); // Chebyshev distance
+                    if (dist === 0) {
+                        currentWeightGrid[ny][nx] = W.ROAD;   // node cell = very walkable
+                    } else if (dist <= 1) {
+                        // 3×3 core: force open (clear buildings)
+                        if (currentWeightGrid[ny][nx] <= 0) currentWeightGrid[ny][nx] = W.OPEN;
+                    } else {
+                        // 5×5 and 7×7 outer ring: only clear completely blocked cells
+                        if (currentWeightGrid[ny][nx] <= 0) currentWeightGrid[ny][nx] = W.ROAD_BUFFER;
+                    }
+                }
+            }
+        });
         const serializableGrid = gridToSerializable(currentWeightGrid);
 
         if (algorithm === 'compare') {

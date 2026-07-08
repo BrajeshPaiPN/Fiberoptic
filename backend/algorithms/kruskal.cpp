@@ -76,7 +76,7 @@ public:
                 if (cellWeight <= 0.0f) continue;
 
                 if (dx[i]!=0 && dy[i]!=0) {
-                    if (grid[cy][nx]<=0.0f && grid[ny][cx]<=0.0f) continue;
+                    if (grid[cy][nx]<=0.0f || grid[ny][cx]<=0.0f) continue;
                 }
 
                 string nStr = nodeStr(nx, ny);
