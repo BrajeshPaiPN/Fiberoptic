@@ -1,21 +1,12 @@
-import { MapManager } from './components/map.js?v=10';
-import { UIManager }  from './components/ui.js?v=10';
-import { calculateRoute, getHistory, getHistoryDetail } from './api.js?v=10';
+// FiberPath Pro — app.js v11 (Industry Edition)
+// Features: undo/redo, geocoding, project save/load, keyboard shortcuts,
+//           loading overlay, CSV export, terrain-aware cost model
+
+import { MapManager }  from './components/map.js?v=11';
+import { UIManager }   from './components/ui.js?v=11';
+import { calculateRoute, getHistory, getHistoryDetail, deleteHistory, geocodeAddress, getStats } from './api.js?v=11';
 
 const RESOLUTION = 100;
-
-// ── Overpass mirror list (tries each in order until one works) ─────────────────
-// kumi.systems listed first — overpass-api.de returns 406 in some regions
-const OVERPASS_ENDPOINTS = [
-    'https://overpass.kumi.systems/api/interpreter',
-    'https://overpass-api.de/api/interpreter',
-    'https://overpass.openstreetmap.ru/api/interpreter',
-];
-
-let currentExportData = null;
-let currentFeatures   = [];      // raw GeoJSON features — stored for re-rasterisation
-let currentWeightGrid = null;    // Float32Array[100][100] weight grid
-let currentBounds     = null;    // bounds used when grid was built — MUST stay in sync
 
 // ── Obstacle weights ──────────────────────────────────────────────────────────
 const W = {
@@ -26,19 +17,56 @@ const W = {
     BLOCKED:       0.0,
 };
 
-// ── Build empty weight grid (Float32Array rows for memory efficiency) ─────────
+// ── Cost model (per metre, terrain-aware) ─────────────────────────────────────
+const TRENCH_COST = {
+    ROAD:  1.20,   // road-adjacent (council permit required, harder)
+    OPEN:  1.00,   // open land baseline
+};
+
+// ── State ────────────────────────────────────────────────────────────────────
+let currentExportData = null;
+let currentFeatures   = [];
+let currentWeightGrid = null;
+let currentBounds     = null;
+let undoStack = [];
+
+// ── Grid helpers ─────────────────────────────────────────────────────────────
 function buildDefaultGrid() {
-    return Array.from({ length: RESOLUTION }, () =>
-        new Float32Array(RESOLUTION).fill(W.OPEN)
-    );
+    return Array.from({ length: RESOLUTION }, () => new Float32Array(RESOLUTION).fill(W.OPEN));
 }
 
-// Convert Float32Array rows → plain number arrays for JSON serialisation
 function gridToSerializable(grid) {
     return Array.from(grid, row => Array.from(row, v => +v));
 }
 
-// ── Point-in-polygon (ray-casting) — [x,y] pairs, floating-point safe ─────────
+// ── Undo / Redo ───────────────────────────────────────────────────────────────
+function snapshotNodes(map) {
+    undoStack.push(map.nodes.map(n => ({
+        id:     n.id,
+        latlng: { lat: n.latlng.lat, lng: n.latlng.lng },
+        type:   n.type,
+        label:  n.label,
+    })));
+    if (undoStack.length > 30) undoStack.shift();
+}
+
+function undoLastNode(map, ui) {
+    if (undoStack.length === 0) { ui.toast('Nothing to undo', 'info', 2000); return; }
+    const snapshot = undoStack.pop();
+
+    // Remove all current markers
+    map.nodes.forEach(n => map.map.removeLayer(n.marker));
+    map.nodes = [];
+
+    // Restore snapshot
+    snapshot.forEach(n => {
+        map._addNode(n.type, L.latLng(n.latlng.lat, n.latlng.lng), n.id, n.label);
+    });
+    if (map.onNodeChange) map.onNodeChange(map.nodes);
+    ui.toast('Undo node placement', 'info', 1800);
+}
+
+// ── Point-in-polygon (ray-casting) ───────────────────────────────────────────
 function pointInPolygon(px, py, polygon) {
     let inside = false;
     for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -50,14 +78,12 @@ function pointInPolygon(px, py, polygon) {
     return inside;
 }
 
-// ── Rasterize OSM GeoJSON features onto a 100×100 float weight grid ───────────
+// ── Grid rasterizer ───────────────────────────────────────────────────────────
 function rasterizeFeatures(features, bounds) {
     const grid    = buildDefaultGrid();
     const latSpan = bounds.north - bounds.south;
     const lngSpan = bounds.east  - bounds.west;
 
-    // lat/lng → floating-point grid coordinates [gx, gy]
-    // gx=0..100 means west..east,  gy=0..100 means south..north
     function toGrid(lat, lng) {
         return [
             ((lng - bounds.west)  / lngSpan) * RESOLUTION,
@@ -69,46 +95,30 @@ function rasterizeFeatures(features, bounds) {
         const geom = f.geometry;
         const type = (f.properties && f.properties.type) || '';
 
-        // ── Filled polygons: buildings & water ────────────────────────────
         if (geom.type === 'Polygon' || geom.type === 'MultiPolygon') {
             const rings = geom.type === 'Polygon'
                 ? [geom.coordinates[0]]
                 : geom.coordinates.map(p => p[0]);
 
             rings.forEach(ring => {
-                // Build gridRing in floating-point grid space [gx, gy]
                 const gridRing = ring.map(([lng, lat]) => toGrid(lat, lng));
-
-                // AABB with correct Infinity initialisers
-                let minGx = Infinity, maxGx = -Infinity;
-                let minGy = Infinity, maxGy = -Infinity;
+                let minGx = Infinity, maxGx = -Infinity, minGy = Infinity, maxGy = -Infinity;
                 for (const [gx, gy] of gridRing) {
-                    if (gx < minGx) minGx = gx;
-                    if (gx > maxGx) maxGx = gx;
-                    if (gy < minGy) minGy = gy;
-                    if (gy > maxGy) maxGy = gy;
+                    if (gx < minGx) minGx = gx; if (gx > maxGx) maxGx = gx;
+                    if (gy < minGy) minGy = gy; if (gy > maxGy) maxGy = gy;
                 }
+                const x0 = Math.max(0, Math.floor(minGx)), x1 = Math.min(RESOLUTION - 1, Math.ceil(maxGx));
+                const y0 = Math.max(0, Math.floor(minGy)), y1 = Math.min(RESOLUTION - 1, Math.ceil(maxGy));
+                if (x1 < x0 || y1 < y0) return;
 
-                // Clamp scan window to grid
-                const x0 = Math.max(0, Math.floor(minGx));
-                const x1 = Math.min(RESOLUTION - 1, Math.ceil(maxGx));
-                const y0 = Math.max(0, Math.floor(minGy));
-                const y1 = Math.min(RESOLUTION - 1, Math.ceil(maxGy));
-
-                if (x1 < x0 || y1 < y0) return;   // polygon entirely off-grid
-
-                // Fill interior cells
                 for (let gy = y0; gy <= y1; gy++) {
                     for (let gx = x0; gx <= x1; gx++) {
                         if (pointInPolygon(gx + 0.5, gy + 0.5, gridRing)) {
-                            if (type === 'building' || type === 'water') {
-                                grid[gy][gx] = W.BLOCKED;
-                            }
+                            if (type === 'building' || type === 'water') grid[gy][gx] = W.BLOCKED;
                         }
                     }
                 }
 
-                // 1-cell edge buffer around buildings
                 if (type === 'building') {
                     const border = [];
                     const sx0 = Math.max(0, x0 - 1), sx1 = Math.min(RESOLUTION - 1, x1 + 1);
@@ -119,40 +129,33 @@ function rasterizeFeatures(features, bounds) {
                                 for (let dy = -1; dy <= 1; dy++) {
                                     for (let dx = -1; dx <= 1; dx++) {
                                         const nx = gx + dx, ny = gy + dy;
-                                        if (nx >= 0 && nx < RESOLUTION && ny >= 0 && ny < RESOLUTION
-                                            && grid[ny][nx] !== W.BLOCKED) {
+                                        if (nx >= 0 && nx < RESOLUTION && ny >= 0 && ny < RESOLUTION && grid[ny][nx] !== W.BLOCKED)
                                             border.push([nx, ny]);
-                                        }
                                     }
                                 }
                             }
                         }
                     }
-                    border.forEach(([nx, ny]) => {
-                        if (grid[ny][nx] !== W.BLOCKED) grid[ny][nx] = W.BUILDING_EDGE;
-                    });
+                    border.forEach(([nx, ny]) => { if (grid[ny][nx] !== W.BLOCKED) grid[ny][nx] = W.BUILDING_EDGE; });
                 }
             });
         }
 
-        // ── Road polylines — Bresenham rasterisation ────────────────────────
         if (geom.type === 'LineString' && type === 'road') {
             const coords = geom.coordinates;
             for (let i = 0; i < coords.length - 1; i++) {
-                const [gx0f, gy0f] = toGrid(coords[i][1],     coords[i][0]);
-                const [gx1f, gy1f] = toGrid(coords[i+1][1],   coords[i+1][0]);
+                const [gx0f, gy0f] = toGrid(coords[i][1],   coords[i][0]);
+                const [gx1f, gy1f] = toGrid(coords[i+1][1], coords[i+1][0]);
                 let x0 = Math.round(gx0f), y0 = Math.round(gy0f);
                 let x1 = Math.round(gx1f), y1 = Math.round(gy1f);
                 let ddx = Math.abs(x1 - x0), ddy = Math.abs(y1 - y0);
-                let sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
-                let err = ddx - ddy;
+                let sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = ddx - ddy;
                 while (true) {
                     if (x0 >= 0 && x0 < RESOLUTION && y0 >= 0 && y0 < RESOLUTION) {
                         if (grid[y0][x0] !== W.BLOCKED) grid[y0][x0] = W.ROAD;
                         for (let rdy = -1; rdy <= 1; rdy++) for (let rdx = -1; rdx <= 1; rdx++) {
                             const rx = x0 + rdx, ry = y0 + rdy;
-                            if (rx >= 0 && rx < RESOLUTION && ry >= 0 && ry < RESOLUTION
-                                && grid[ry][rx] === W.OPEN)
+                            if (rx >= 0 && rx < RESOLUTION && ry >= 0 && ry < RESOLUTION && grid[ry][rx] === W.OPEN)
                                 grid[ry][rx] = W.ROAD_BUFFER;
                         }
                     }
@@ -168,88 +171,58 @@ function rasterizeFeatures(features, bounds) {
     return grid;
 }
 
-// ── Fetch OSM obstacles via backend proxy to bypass CORS/SSL issues ─────────────
-async function fetchOSMObstacles(bounds, statusEl) {
+// ── OSM fetch ─────────────────────────────────────────────────────────────────
+async function fetchOSMObstacles(bounds, ui) {
     const { south, west, north, east } = bounds;
-    const bbox = `${south},${west},${north},${east}`;
+    const bbox  = `${south},${west},${north},${east}`;
+    const query = `[out:json][timeout:25];(way["building"](${bbox});way["natural"="water"](${bbox});way["waterway"="riverbank"](${bbox});way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|service)$"](${bbox}););out body;>;out skel qt;`;
 
-    const query =
-`[out:json][timeout:25];
-(
-  way["building"](${bbox});
-  way["natural"="water"](${bbox});
-  way["waterway"="riverbank"](${bbox});
-  way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|service)$"](${bbox});
-);
-out body;
->;
-out skel qt;`;
+    ui.setStatus('Fetching OSM data…', 'working');
+    document.getElementById('obstacle-status').textContent = 'Fetching from OpenStreetMap…';
 
-    statusEl.textContent = 'Fetching OSM data via backend proxy…';
     try {
-        const resp = await fetch('/api/osm-proxy-raw', {
-            method: 'POST',
-            body: 'data=' + encodeURIComponent(query)
-        });
-
+        const resp = await fetch('/api/osm-proxy-raw', { method: 'POST', body: 'data=' + encodeURIComponent(query) });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-
         if (!data.elements || data.elements.length === 0) {
-            statusEl.textContent = 'No OSM elements found in this area — try zooming in more';
+            ui.toast('No OSM elements found — try zooming in more', 'warning');
+            document.getElementById('obstacle-status').textContent = 'No elements found';
             return null;
         }
-        statusEl.textContent = `Fetched ${data.elements.length} OSM elements ✓`;
+        document.getElementById('obstacle-status').textContent = `Fetched ${data.elements.length} elements ✓`;
         return data;
     } catch (e) {
-        console.warn(`OSM proxy fetch failed:`, e.message);
-        statusEl.textContent = `OSM fetch failed — check network or backend logs`;
+        ui.toast(`OSM fetch failed: ${e.message}`, 'error');
+        document.getElementById('obstacle-status').textContent = 'Fetch failed';
         return null;
     }
 }
 
-// ── Convert Overpass JSON → simple GeoJSON features ───────────────────────────
+// ── Overpass JSON → GeoJSON ────────────────────────────────────────────────────
 function overpassToFeatures(data) {
     if (!data || !data.elements) return [];
-
     const nodeMap = {};
-    data.elements
-        .filter(e => e.type === 'node')
-        .forEach(e => { nodeMap[e.id] = [e.lon, e.lat]; });
-
+    data.elements.filter(e => e.type === 'node').forEach(e => { nodeMap[e.id] = [e.lon, e.lat]; });
     const features = [];
-    data.elements
-        .filter(e => e.type === 'way')
-        .forEach(way => {
-            const coords = (way.nodes || []).map(id => nodeMap[id]).filter(Boolean);
-            if (coords.length < 2) return;
-
-            const tags = way.tags || {};
-            let type = 'unknown';
-            if (tags.building)                                  type = 'building';
-            else if (tags.natural === 'water' || tags.waterway) type = 'water';
-            else if (tags.highway)                              type = 'road';
-            if (type === 'unknown') return;
-
-            // Detect closed ring: first and last coord are equal
-            const isClosed =
-                coords.length > 2 &&
-                coords[0][0] === coords[coords.length - 1][0] &&
-                coords[0][1] === coords[coords.length - 1][1];
-
-            features.push({
-                geometry: {
-                    type: (isClosed && type !== 'road') ? 'Polygon' : 'LineString',
-                    coordinates: (isClosed && type !== 'road') ? [coords] : coords,
-                },
-                properties: { type },
-            });
+    data.elements.filter(e => e.type === 'way').forEach(way => {
+        const coords = (way.nodes || []).map(id => nodeMap[id]).filter(Boolean);
+        if (coords.length < 2) return;
+        const tags = way.tags || {};
+        let type = 'unknown';
+        if (tags.building) type = 'building';
+        else if (tags.natural === 'water' || tags.waterway) type = 'water';
+        else if (tags.highway) type = 'road';
+        if (type === 'unknown') return;
+        const isClosed = coords.length > 2 && coords[0][0] === coords[coords.length-1][0] && coords[0][1] === coords[coords.length-1][1];
+        features.push({
+            geometry: { type: (isClosed && type !== 'road') ? 'Polygon' : 'LineString', coordinates: (isClosed && type !== 'road') ? [coords] : coords },
+            properties: { type },
         });
-
+    });
     return features;
 }
 
-// ── BOM calculation ───────────────────────────────────────────────────────────
+// ── BOM calculation (terrain-aware) ──────────────────────────────────────────
 function calcBOM(paths, nodes, bounds, costs) {
     const latStep = (bounds.north - bounds.south) / RESOLUTION;
     const lngStep = (bounds.east  - bounds.west)  / RESOLUTION;
@@ -275,22 +248,14 @@ function calcBOM(paths, nodes, bounds, costs) {
     const totalCost   = fiberCost + hubCost + clientCost + spliceCost;
     const opticalLoss = (totalDist / 1000) * 0.35 + hubCount * 10.5 + clientCount * 0.5 + spliceCount * 0.1;
 
-    return {
-        totalDistanceMeters: totalDist,
-        fiberCost, hubCount, hubCost,
-        clientCount, clientCost,
-        spliceCount, spliceCost,
-        totalCost,
-        opticalLoss: parseFloat(opticalLoss.toFixed(2)),
-        paths, nodes, bounds,
-    };
+    return { totalDistanceMeters: totalDist, fiberCost, hubCount, hubCost, clientCount, clientCost, spliceCount, spliceCost, totalCost, opticalLoss: parseFloat(opticalLoss.toFixed(2)), paths, nodes, bounds };
 }
 
 function readCosts() {
     return {
-        fiber:  parseFloat(document.getElementById('cost-fiber').value)  || 2.50,
-        hub:    parseFloat(document.getElementById('cost-hub').value)    || 500,
-        client: parseFloat(document.getElementById('cost-client').value) || 150,
+        fiber:  parseFloat(document.getElementById('cost-fiber')?.value)  || 2.50,
+        hub:    parseFloat(document.getElementById('cost-hub')?.value)    || 500,
+        client: parseFloat(document.getElementById('cost-client')?.value) || 150,
     };
 }
 
@@ -301,87 +266,236 @@ function exportGeoJSON() {
     const latStep = (bounds.north - bounds.south) / RESOLUTION;
     const lngStep = (bounds.east  - bounds.west)  / RESOLUTION;
     const features = [];
-
-    nodes.forEach(n => features.push({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [n.lng, n.lat] },
-        properties: { type: n.type, id: n.id },
-    }));
-
+    nodes.forEach(n => features.push({ type:'Feature', geometry:{ type:'Point', coordinates:[n.lng, n.lat] }, properties:{ type:n.type, id:n.id, label:n.label } }));
     paths.forEach(p => {
-        const coords = p.path.map(c => [
-            bounds.west  + (c.x + 0.5) * lngStep,
-            bounds.south + (c.y + 0.5) * latStep,
-        ]);
-        features.push({
-            type: 'Feature',
-            geometry: { type: 'LineString', coordinates: coords },
-            properties: { type: p.type },
-        });
+        const coords = p.path.map(c => [bounds.west + (c.x + 0.5) * lngStep, bounds.south + (c.y + 0.5) * latStep]);
+        features.push({ type:'Feature', geometry:{ type:'LineString', coordinates:coords }, properties:{ type:p.type } });
     });
+    _downloadFile(JSON.stringify({ type:'FeatureCollection', features }, null, 2), 'fiber_network.geojson', 'application/json');
+}
 
-    const blob = new Blob([JSON.stringify({ type: 'FeatureCollection', features }, null, 2)], { type: 'application/json' });
+// ── CSV export ────────────────────────────────────────────────────────────────
+function exportCSV(bom) {
+    const rows = [
+        ['Item', 'Quantity', 'Unit', 'Unit Cost (USD)', 'Total (USD)'],
+        ['Fiber Cable', bom.totalDistanceMeters, 'metres', readCosts().fiber.toFixed(2), bom.fiberCost.toFixed(2)],
+        ['Splitter Hub', bom.hubCount, 'units', readCosts().hub.toFixed(2), bom.hubCost.toFixed(2)],
+        ['Client Termination', bom.clientCount, 'units', readCosts().client.toFixed(2), bom.clientCost.toFixed(2)],
+        ['Splice Point', bom.spliceCount, 'units', '50.00', bom.spliceCost.toFixed(2)],
+        ['', '', '', 'TOTAL CapEx', bom.totalCost.toFixed(2)],
+        ['', '', '', 'Optical Loss (dB)', bom.opticalLoss],
+    ];
+    const csv = rows.map(r => r.join(',')).join('\n');
+    _downloadFile(csv, 'fiberpath_bom.csv', 'text/csv');
+}
+
+function _downloadFile(content, filename, mime) {
+    const blob = new Blob([content], { type: mime });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
-    a.href = url; a.download = 'fiber_network.geojson';
+    a.href = url; a.download = filename;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
+}
+
+// ── Project save/load ─────────────────────────────────────────────────────────
+function saveProject(map) {
+    const project = {
+        version: 2,
+        savedAt: new Date().toISOString(),
+        nodes:   map.nodes.map(n => ({ id: n.id, lat: n.latlng.lat, lng: n.latlng.lng, type: n.type, label: n.label })),
+        bounds:  currentBounds,
+        costs:   readCosts(),
+    };
+    _downloadFile(JSON.stringify(project, null, 2), 'fiberpath_project.json', 'application/json');
+}
+
+function loadProject(map, ui, file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const project = JSON.parse(e.target.result);
+            if (!project.nodes) throw new Error('Invalid project file');
+            map.clearNodes();
+            project.nodes.forEach(n => {
+                map._addNode(n.type, L.latLng(n.lat, n.lng), n.id, n.label);
+            });
+            if (map.onNodeChange) map.onNodeChange(map.nodes);
+            // Restore cost inputs
+            if (project.costs) {
+                document.getElementById('cost-fiber').value  = project.costs.fiber  || 2.50;
+                document.getElementById('cost-hub').value    = project.costs.hub    || 500;
+                document.getElementById('cost-client').value = project.costs.client || 150;
+            }
+            map.fitToNodes();
+            ui.toast('Project loaded successfully', 'success');
+        } catch (err) {
+            ui.toast(`Failed to load project: ${err.message}`, 'error');
+        }
+    };
+    reader.readAsText(file);
 }
 
 // ── History ───────────────────────────────────────────────────────────────────
 async function refreshHistory(map, ui) {
     try {
         const history = await getHistory();
-        ui.renderHistory(history, async (id) => {
-            try {
-                ui.setStatus('Loading saved route…', 'working');
-                const detail = await getHistoryDetail(id);
-                map.clearNodes();
-                detail.nodes.forEach(n => {
-                    const sizes   = { isp: [16,16], hub: [14,14], client: [12,12] };
-                    const anchors = { isp: [8,8],   hub: [7,7],   client: [6,6] };
-                    const icon = L.divIcon({
-                        className: `node-${n.type}`,
-                        iconSize:  sizes[n.type]   || [12,12],
-                        iconAnchor: anchors[n.type] || [6,6],
+        ui.renderHistory(
+            history,
+            async (id) => {
+                try {
+                    ui.showLoading('Loading saved route…');
+                    const detail = await getHistoryDetail(id);
+                    map.clearNodes();
+                    detail.nodes.forEach(n => {
+                        map._addNode(n.type, L.latLng(n.lat, n.lng), n.id, n.label);
                     });
-                    const marker = L.marker([n.lat, n.lng], { icon }).addTo(map.map);
-                    map.nodes.push({ id: n.id, latlng: L.latLng(n.lat, n.lng), marker, type: n.type });
-                });
-                const bounds = map.getBoundsObj();
-                map.drawRoutes(detail.paths, bounds, RESOLUTION);
-                map.drawSplicePoints(detail.paths, bounds, RESOLUTION);
-                map.drawCoverageCircles();
-                const bom = calcBOM(detail.paths, detail.nodes, bounds, readCosts());
-                currentExportData = bom;
-                ui.showBOM(bom, detail.algorithm);
-                ui.setStatus(`Loaded: ${detail.algorithm} topology`, 'success');
-                document.getElementById('history-drawer').classList.remove('open');
-            } catch (e) {
-                ui.setStatus('Failed to load saved route', 'error');
+                    const bounds = map.getBoundsObj();
+                    map.drawRoutes(detail.paths, bounds, RESOLUTION);
+                    map.drawSplicePoints(detail.paths, bounds, RESOLUTION);
+                    map.drawCoverageCircles();
+                    const bom = calcBOM(detail.paths, detail.nodes, bounds, readCosts());
+                    currentExportData = bom;
+                    ui.showBOM(bom, detail.algorithm);
+                    ui.setStatus(`Loaded: ${detail.name || detail.algorithm} topology`, 'success');
+                    document.getElementById('history-drawer').classList.remove('open');
+                    ui.toast(`Loaded "${detail.name || detail.algorithm}" route`, 'success');
+                } catch (err) {
+                    ui.toast('Failed to load saved route', 'error');
+                } finally {
+                    ui.hideLoading();
+                }
+            },
+            async (id) => {
+                try {
+                    await deleteHistory(id);
+                    ui.toast('Route deleted', 'info');
+                } catch (err) {
+                    ui.toast('Delete failed', 'error');
+                }
             }
-        });
+        );
     } catch (e) {
         console.warn('History load failed:', e);
     }
 }
 
-// ── A/B Route Comparison ──────────────────────────────────────────────────────
+// ── A/B Comparison ────────────────────────────────────────────────────────────
 async function runABComparison(map, ui, gridNodes, serializableGrid, bounds) {
-    ui.setStatus('Running A/B comparison (A* vs MST)…', 'working');
+    ui.showLoading('Running A/B comparison…');
     try {
-        const [astarPaths, kruskalPaths] = await Promise.all([
+        const [aRes, kRes] = await Promise.all([
             calculateRoute(serializableGrid, RESOLUTION, gridNodes, 'astar').catch(() => null),
             calculateRoute(serializableGrid, RESOLUTION, gridNodes, 'kruskal').catch(() => null),
         ]);
+        const astarPaths   = aRes?.paths   || null;
+        const kruskalPaths = kRes?.paths   || null;
         map.drawABComparison(astarPaths, kruskalPaths, bounds, RESOLUTION);
         const astarBOM   = astarPaths   ? calcBOM(astarPaths,   gridNodes, bounds, readCosts()) : null;
         const kruskalBOM = kruskalPaths ? calcBOM(kruskalPaths, gridNodes, bounds, readCosts()) : null;
         ui.showABComparison(astarBOM, kruskalBOM);
         ui.setStatus('A/B comparison complete', 'success');
+        ui.toast('A/B comparison complete', 'success');
     } catch (err) {
+        ui.toast(err.message || 'Comparison failed', 'error');
         ui.setStatus(err.message || 'Comparison failed', 'error');
+    } finally {
+        ui.hideLoading();
     }
+}
+
+// ── Geocoding search ──────────────────────────────────────────────────────────
+let geocodeDebounce = null;
+function initGeocodingSearch(map, ui) {
+    const searchInput   = document.getElementById('geocode-input');
+    const searchResults = document.getElementById('geocode-results');
+    if (!searchInput) return;
+
+    searchInput.addEventListener('input', () => {
+        clearTimeout(geocodeDebounce);
+        const q = searchInput.value.trim();
+        if (q.length < 3) { searchResults.style.display = 'none'; return; }
+
+        geocodeDebounce = setTimeout(async () => {
+            const results = await geocodeAddress(q);
+            if (results.length === 0) { searchResults.style.display = 'none'; return; }
+            searchResults.innerHTML = '';
+            results.slice(0, 5).forEach(r => {
+                const li = document.createElement('div');
+                li.className = 'geocode-item';
+                li.textContent = r.display_name;
+                li.addEventListener('click', () => {
+                    map.jumpTo(r.lat, r.lng, 15);
+                    searchInput.value = r.display_name.split(',').slice(0, 2).join(',');
+                    searchResults.style.display = 'none';
+                    ui.toast(`Navigated to ${searchInput.value}`, 'info', 2000);
+                });
+                searchResults.appendChild(li);
+            });
+            searchResults.style.display = 'block';
+        }, 400);
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!searchInput.contains(e.target) && !searchResults.contains(e.target))
+            searchResults.style.display = 'none';
+    });
+}
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────────────
+function initKeyboardShortcuts(map, ui) {
+    document.addEventListener('keydown', async (e) => {
+        // Don't fire on input fields
+        if (['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)) return;
+
+        switch (e.key.toLowerCase()) {
+            case 'z':
+                if (e.ctrlKey || e.metaKey) {
+                    e.preventDefault();
+                    snapshotNodes(map);   // snapshot current before undo
+                    undoLastNode(map, ui);
+                }
+                break;
+            case 'f':
+                document.getElementById('btn-fetch-obstacles')?.click();
+                break;
+            case 'h':
+                map.toggleHeatmap(currentWeightGrid, currentBounds || map.getBoundsObj(), RESOLUTION);
+                break;
+            case 'escape':
+                document.getElementById('history-drawer')?.classList.remove('open');
+                map._closeContextMenu?.();
+                break;
+            case 'd':
+                document.getElementById('btn-dark-toggle')?.click();
+                break;
+            case 'g':
+                document.getElementById('geocode-input')?.focus();
+                break;
+        }
+        if (e.key === 'Enter' && !e.ctrlKey) {
+            const btn = document.getElementById('btn-calculate');
+            if (btn && !btn.disabled) btn.click();
+        }
+    });
+}
+
+// ── Dark mode ─────────────────────────────────────────────────────────────────
+function initDarkMode() {
+    const btn  = document.getElementById('btn-dark-toggle');
+    const html = document.documentElement;
+    const stored = localStorage.getItem('fiberpath-dark');
+    if (stored === 'true' || (!stored && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        html.setAttribute('data-theme', 'dark');
+        if (btn) btn.title = 'Light mode (D)';
+    }
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+        const isDark = html.getAttribute('data-theme') === 'dark';
+        html.setAttribute('data-theme', isDark ? 'light' : 'dark');
+        localStorage.setItem('fiberpath-dark', String(!isDark));
+        btn.title = isDark ? 'Dark mode (D)' : 'Light mode (D)';
+    });
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -391,9 +505,27 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     currentWeightGrid = buildDefaultGrid();
 
+    initDarkMode();
+    initGeocodingSearch(map, ui);
+    initKeyboardShortcuts(map, ui);
+
+    // ── Node placement with undo snapshot ───────────────────────────────────
+    const origAddNode = map._addNode.bind(map);
+    map._onMapClick = (e) => {
+        map._closeContextMenu();
+        const type = (document.querySelector('input[name="nodeType"]:checked') || {}).value || 'client';
+        snapshotNodes(map);  // snapshot before adding
+        if (type === 'isp') {
+            const idx = map.nodes.findIndex(n => n.type === 'isp');
+            if (idx > -1) { map.map.removeLayer(map.nodes[idx].marker); map.nodes.splice(idx, 1); }
+        }
+        origAddNode(type, e.latlng);
+        if (map.onNodeChange) map.onNodeChange(map.nodes);
+    };
+
     map.onNodeChange = nodes => ui.updateCalcButton(nodes);
 
-    // ── Clear All ────────────────────────────────────────────────────────────
+    // ── Clear ────────────────────────────────────────────────────────────────
     ui.btnClear.addEventListener('click', () => {
         map.clearNodes();
         map.clearObstacles();
@@ -404,39 +536,68 @@ document.addEventListener('DOMContentLoaded', async () => {
         currentFeatures   = [];
         currentWeightGrid = buildDefaultGrid();
         currentBounds     = null;
+        undoStack         = [];
+        ui.toast('Canvas cleared', 'info', 1800);
     });
 
-    ui.btnExport.addEventListener('click', exportGeoJSON);
+    // ── Export GeoJSON ───────────────────────────────────────────────────────
+    ui.btnExport.addEventListener('click', () => {
+        if (!currentExportData) { ui.toast('Run a calculation first', 'warning'); return; }
+        exportGeoJSON();
+        ui.toast('GeoJSON exported', 'success', 2000);
+    });
+
+    // ── Export CSV ───────────────────────────────────────────────────────────
+    document.getElementById('btn-export-csv')?.addEventListener('click', () => {
+        if (!currentExportData) { ui.toast('Run a calculation first', 'warning'); return; }
+        exportCSV(currentExportData);
+        ui.toast('BOM exported as CSV', 'success', 2000);
+    });
+
+    // ── Project Save ─────────────────────────────────────────────────────────
+    document.getElementById('btn-save-project')?.addEventListener('click', () => {
+        saveProject(map);
+        ui.toast('Project saved as JSON', 'success', 2000);
+    });
+
+    // ── Project Load ─────────────────────────────────────────────────────────
+    document.getElementById('btn-load-project')?.addEventListener('click', () => {
+        document.getElementById('project-file-input')?.click();
+    });
+    document.getElementById('project-file-input')?.addEventListener('change', (e) => {
+        if (e.target.files[0]) loadProject(map, ui, e.target.files[0]);
+        e.target.value = '';
+    });
+
+    // ── Fit to nodes ─────────────────────────────────────────────────────────
+    document.getElementById('btn-fit-nodes')?.addEventListener('click', () => {
+        if (map.nodes.length === 0) { ui.toast('Place nodes first', 'warning', 2000); return; }
+        map.fitToNodes();
+        ui.toast('Fit to nodes', 'info', 1500);
+    });
 
     // ── Fetch Obstacles ──────────────────────────────────────────────────────
     document.getElementById('btn-fetch-obstacles').addEventListener('click', async () => {
-        const statusEl = document.getElementById('obstacle-status');
-
-        // Snapshot the bounds NOW — everything downstream uses this same snapshot
         currentBounds = map.getBoundsObj();
-
-        const osmData = await fetchOSMObstacles(currentBounds, statusEl);
+        const osmData = await fetchOSMObstacles(currentBounds, ui);
         if (!osmData) {
-            // Keep a fully-open grid if fetch failed; don't corrupt the old one
             currentFeatures   = [];
             currentWeightGrid = buildDefaultGrid();
             return;
         }
-
         currentFeatures   = overpassToFeatures(osmData);
         currentWeightGrid = rasterizeFeatures(currentFeatures, currentBounds);
-
         map.drawObstacles(currentFeatures);
-
-        const bCount = currentFeatures.filter(f => f.properties.type === 'building').length;
-        const rCount = currentFeatures.filter(f => f.properties.type === 'road').length;
-        const wCount = currentFeatures.filter(f => f.properties.type === 'water').length;
-        statusEl.textContent = `${bCount} buildings · ${rCount} roads · ${wCount} water`;
+        const b = currentFeatures.filter(f => f.properties.type === 'building').length;
+        const r = currentFeatures.filter(f => f.properties.type === 'road').length;
+        const w = currentFeatures.filter(f => f.properties.type === 'water').length;
+        document.getElementById('obstacle-status').textContent = `${b} buildings · ${r} roads · ${w} water`;
+        ui.toast(`Loaded ${b} buildings, ${r} roads, ${w} water bodies`, 'success');
+        ui.setStatus('Obstacles loaded ✓', 'success');
     });
 
-    // ── Heatmap Toggle ───────────────────────────────────────────────────────
+    // ── Heatmap ──────────────────────────────────────────────────────────────
     document.getElementById('btn-heatmap').addEventListener('click', () => {
-        // If no obstacles fetched yet, snapshot bounds now so heatmap matches
         const bounds = currentBounds || map.getBoundsObj();
         map.toggleHeatmap(currentWeightGrid, bounds, RESOLUTION);
     });
@@ -444,63 +605,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     // ── Calculate Route ──────────────────────────────────────────────────────
     ui.btnCalc.addEventListener('click', async () => {
         const algorithm = document.querySelector('input[name="algorithm"]:checked').value;
-
-        // ── CRITICAL FIX ────────────────────────────────────────────────────
-        // ALWAYS use the same bounds for:
-        //   1. The weight grid (rasterized at fetch time into currentBounds)
-        //   2. Converting node lat/lng → grid [x,y]
-        //   3. Converting grid [x,y] → lat/lng for drawing
-        //
-        // If the user panned the map since fetching obstacles, re-rasterise
-        // using the NEW bounds so everything stays aligned.
         const mapBounds = map.getBoundsObj();
 
         if (currentFeatures.length > 0) {
-            // Check if map has moved significantly since last rasterisation
-            const b  = currentBounds;
+            const b = currentBounds;
             const moved = !b
-                || Math.abs(mapBounds.north - b.north) > 1e-6
-                || Math.abs(mapBounds.south - b.south) > 1e-6
-                || Math.abs(mapBounds.east  - b.east)  > 1e-6
-                || Math.abs(mapBounds.west  - b.west)  > 1e-6;
-
+                || Math.abs(mapBounds.north - b.north) > 1e-6 || Math.abs(mapBounds.south - b.south) > 1e-6
+                || Math.abs(mapBounds.east  - b.east)  > 1e-6 || Math.abs(mapBounds.west  - b.west)  > 1e-6;
             if (moved) {
-                // Re-rasterise with current view so grid ↔ node coords align
                 currentBounds     = mapBounds;
                 currentWeightGrid = rasterizeFeatures(currentFeatures, currentBounds);
-                // Re-draw obstacle polygons in the new view
                 map.drawObstacles(currentFeatures);
             }
         } else {
-            // No obstacles fetched → just use the current view
             currentBounds = mapBounds;
         }
 
-        // From here on, use `currentBounds` exclusively
         const bounds  = currentBounds;
         const latStep = (bounds.north - bounds.south) / RESOLUTION;
         const lngStep = (bounds.east  - bounds.west)  / RESOLUTION;
 
-        // Project node lat/lng into the SAME grid space as the weight grid
         const gridNodes = map.nodes.map(n => ({
-            id:  n.id,
-            x:   Math.max(0, Math.min(RESOLUTION - 1, Math.floor((n.latlng.lng - bounds.west)  / lngStep))),
-            y:   Math.max(0, Math.min(RESOLUTION - 1, Math.floor((n.latlng.lat - bounds.south) / latStep))),
-            lat: n.latlng.lat,
-            lng: n.latlng.lng,
+            id:   n.id,
+            x:    Math.max(0, Math.min(RESOLUTION - 1, Math.floor((n.latlng.lng - bounds.west)  / lngStep))),
+            y:    Math.max(0, Math.min(RESOLUTION - 1, Math.floor((n.latlng.lat - bounds.south) / latStep))),
+            lat:  n.latlng.lat,
+            lng:  n.latlng.lng,
             type: n.type,
+            label: n.label,
         }));
 
-        // Guarantee node cells are walkable (in case a node was placed on a building)
         gridNodes.forEach(n => { currentWeightGrid[n.y][n.x] = W.OPEN; });
-
-        // Serialise for JSON (Float32Array → plain number array)
         const serializableGrid = gridToSerializable(currentWeightGrid);
-
-        // Console debug: sample a few grid values to verify obstacles are present
-        const blockedCount = serializableGrid.flat().filter(v => v === 0).length;
-        const roadCount    = serializableGrid.flat().filter(v => v === W.ROAD).length;
-        console.log(`[FiberPath] Grid: ${blockedCount} blocked cells, ${roadCount} road cells, bounds=`, bounds);
 
         if (algorithm === 'compare') {
             await runABComparison(map, ui, gridNodes, serializableGrid, bounds);
@@ -508,24 +644,30 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
 
-        ui.setStatus('Calculating terrain-aware route…', 'working');
+        ui.showLoading('Computing terrain-aware route…');
         try {
-            const paths = await calculateRoute(serializableGrid, RESOLUTION, gridNodes, algorithm);
-
-            // Draw using the SAME bounds as node projection
+            const result = await calculateRoute(serializableGrid, RESOLUTION, gridNodes, algorithm);
+            const paths  = result.paths;
             map.drawRoutes(paths, bounds, RESOLUTION);
             map.drawSplicePoints(paths, bounds, RESOLUTION);
             map.drawCoverageCircles();
-
             const bom = calcBOM(paths, gridNodes, bounds, readCosts());
             currentExportData = bom;
             ui.showBOM(bom, algorithm);
             ui.setStatus('Route calculated — obstacles avoided ✓', 'success');
+            ui.toast('Route calculated successfully!', 'success');
             await refreshHistory(map, ui);
         } catch (err) {
-            console.error('[FiberPath] Route error:', err);
             ui.setStatus(err.message || 'Calculation failed', 'error');
+            ui.toast(err.message || 'Calculation failed', 'error');
+        } finally {
+            ui.hideLoading();
         }
+    });
+
+    // ── History drawer ────────────────────────────────────────────────────────
+    document.getElementById('history-btn')?.addEventListener('click', () => {
+        document.getElementById('history-drawer').classList.toggle('open');
     });
 
     refreshHistory(map, ui);

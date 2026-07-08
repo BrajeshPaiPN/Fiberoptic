@@ -1,47 +1,71 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FiberPath Pro — Optical Network Planner</title>
-    <meta name="description" content="Enterprise-grade optical fiber network planning with weighted obstacle routing and terrain-aware A* pathfinding.">
+    <meta name="description" content="Industry-grade optical fiber network planning with real-time OSM data, A* pathfinding, Kruskal's MST, and full BOM estimation.">
 
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
     <!-- Leaflet -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
     <style>
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
+        /* ══════════════════════════════════════════════════════════════
+           DESIGN TOKENS — Light + Dark
+        ══════════════════════════════════════════════════════════════ */
         :root {
-            --panel-w: 370px;
-            --c-bg: #f1f5f9;
-            --c-surface: #ffffff;
-            --c-border: #e2e8f0;
+            --panel-w: 380px;
+            --c-bg:           #f0f4f8;
+            --c-surface:      #ffffff;
+            --c-surface-2:    #f8fafc;
+            --c-border:       #e2e8f0;
             --c-border-hover: #cbd5e1;
-            --c-text: #0f172a;
-            --c-muted: #64748b;
-            --c-accent: #2563eb;
+            --c-text:         #0f172a;
+            --c-muted:        #64748b;
+            --c-accent:       #2563eb;
             --c-accent-hover: #1d4ed8;
             --c-accent-light: #eff6ff;
-            --c-accent-border: #bfdbfe;
-            --c-success: #059669;
-            --c-danger: #dc2626;
-            --c-warning: #d97706;
-            --c-purple: #9333ea;
-            --c-warning-bg: #fef2f2;
-            --c-warning-border: #fca5a5;
+            --c-accent-border:#bfdbfe;
+            --c-success:      #059669;
+            --c-danger:       #dc2626;
+            --c-warning:      #d97706;
+            --c-purple:       #7c3aed;
             --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
-            --shadow-md: 0 4px 16px rgba(0,0,0,0.07), 0 1px 4px rgba(0,0,0,0.04);
-            --shadow-lg: 0 20px 40px rgba(0,0,0,0.1), 0 4px 12px rgba(0,0,0,0.05);
-            --radius: 8px;
+            --shadow-md: 0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.04);
+            --shadow-lg: 0 20px 48px rgba(0,0,0,0.12), 0 4px 12px rgba(0,0,0,0.06);
+            --radius:    8px;
             --radius-lg: 12px;
+            --panel-bg:  var(--c-surface);
         }
+        [data-theme="dark"] {
+            --c-bg:           #0f172a;
+            --c-surface:      #1e293b;
+            --c-surface-2:    #1a2537;
+            --c-border:       #334155;
+            --c-border-hover: #475569;
+            --c-text:         #f1f5f9;
+            --c-muted:        #94a3b8;
+            --c-accent:       #3b82f6;
+            --c-accent-hover: #2563eb;
+            --c-accent-light: #1e3a5f;
+            --c-accent-border:#1e40af;
+            --c-success:      #10b981;
+            --c-danger:       #f87171;
+            --c-warning:      #fbbf24;
+            --c-purple:       #a78bfa;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+            --shadow-md: 0 4px 16px rgba(0,0,0,0.4);
+            --shadow-lg: 0 20px 48px rgba(0,0,0,0.6);
+            --panel-bg:  var(--c-surface);
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -50,278 +74,393 @@
             height: 100vh;
             overflow: hidden;
             -webkit-font-smoothing: antialiased;
+            transition: background 0.3s, color 0.3s;
         }
 
         #app { display: flex; height: 100vh; width: 100vw; }
 
-        /* ── PANEL ── */
+        /* ── PANEL ──────────────────────────────────────────────────── */
         #panel {
-            width: var(--panel-w);
-            min-width: var(--panel-w);
-            max-width: var(--panel-w);
-            background: var(--c-surface);
+            width: var(--panel-w); min-width: var(--panel-w); max-width: var(--panel-w);
+            background: var(--panel-bg);
             border-right: 1px solid var(--c-border);
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
-            overflow: hidden;
+            display: flex; flex-direction: column;
+            height: 100vh; overflow: hidden;
             box-shadow: var(--shadow-sm);
-            z-index: 100;
+            z-index: 100; flex-shrink: 0;
+            transition: background 0.3s, border-color 0.3s;
+        }
+
+        /* ── PANEL HEADER ───────────────────────────────────────────── */
+        #panel-header {
+            padding: 1rem 1.25rem 0.85rem;
+            border-bottom: 1px solid var(--c-border);
+            background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%);
             flex-shrink: 0;
         }
 
-        #panel-header {
-            padding: 1.25rem 1.5rem 1rem;
-            border-bottom: 1px solid var(--c-border);
-            background: linear-gradient(135deg, #1e3a8a 0%, #1d4ed8 100%);
-        }
-
-        #panel-header .logo { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.15rem; }
-
-        #panel-header .logo-icon {
-            width: 30px; height: 30px;
-            background: rgba(255,255,255,0.2);
-            border-radius: 8px;
+        .header-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.7rem; }
+        .logo { display: flex; align-items: center; gap: 0.65rem; }
+        .logo-icon {
+            width: 32px; height: 32px;
+            background: rgba(255,255,255,0.18);
+            border-radius: 9px;
             display: flex; align-items: center; justify-content: center;
             border: 1px solid rgba(255,255,255,0.3);
+            flex-shrink: 0;
         }
+        #panel-header h1 { font-size: 1.05rem; font-weight: 800; color: white; letter-spacing: -0.02em; }
+        .header-sub { font-size: 0.7rem; color: rgba(255,255,255,0.68); margin-top: 1px; }
 
-        #panel-header h1 { font-size: 1rem; font-weight: 700; color: white; letter-spacing: -0.02em; }
-        #panel-header p  { font-size: 0.73rem; color: rgba(255,255,255,0.72); }
+        .header-actions { display: flex; gap: 0.4rem; }
+        .icon-btn {
+            width: 30px; height: 30px;
+            background: rgba(255,255,255,0.15);
+            border: 1px solid rgba(255,255,255,0.25);
+            border-radius: 7px;
+            color: white; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.15s;
+            font-size: 0.8rem;
+        }
+        .icon-btn:hover { background: rgba(255,255,255,0.25); }
 
+        /* ── GEOCODING SEARCH ───────────────────────────────────────── */
+        .geocode-wrap { position: relative; }
+        #geocode-input {
+            width: 100%; padding: 0.45rem 0.75rem 0.45rem 2rem;
+            background: rgba(255,255,255,0.15);
+            border: 1px solid rgba(255,255,255,0.25);
+            border-radius: 7px;
+            color: white; font-size: 0.78rem; font-family: inherit;
+            outline: none; transition: all 0.15s;
+        }
+        #geocode-input::placeholder { color: rgba(255,255,255,0.55); }
+        #geocode-input:focus { background: rgba(255,255,255,0.22); border-color: rgba(255,255,255,0.5); }
+        .geocode-icon {
+            position: absolute; left: 0.6rem; top: 50%; transform: translateY(-50%);
+            color: rgba(255,255,255,0.7); pointer-events: none;
+        }
+        #geocode-results {
+            position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+            background: var(--c-surface);
+            border: 1px solid var(--c-border);
+            border-radius: 8px;
+            box-shadow: var(--shadow-lg);
+            z-index: 9999; max-height: 200px; overflow-y: auto;
+            display: none;
+        }
+        .geocode-item {
+            padding: 0.55rem 0.85rem;
+            font-size: 0.76rem; color: var(--c-text);
+            cursor: pointer; border-bottom: 1px solid var(--c-border);
+            transition: background 0.1s;
+        }
+        .geocode-item:last-child { border-bottom: none; }
+        .geocode-item:hover { background: var(--c-accent-light); color: var(--c-accent); }
+
+        /* ── PANEL BODY ─────────────────────────────────────────────── */
         #panel-body {
             flex: 1; min-height: 0;
             overflow-y: scroll; overflow-x: hidden;
-            padding: 1rem;
-            display: flex; flex-direction: column; gap: 0.75rem;
+            padding: 0.9rem;
+            display: flex; flex-direction: column; gap: 0.65rem;
         }
-
         #panel-body::-webkit-scrollbar { width: 4px; }
-        #panel-body::-webkit-scrollbar-track { background: transparent; }
         #panel-body::-webkit-scrollbar-thumb { background: var(--c-border); border-radius: 99px; }
 
-        /* ── ACCORDION ── */
+        /* ── ACCORDION ──────────────────────────────────────────────── */
         .acc {
-            border: 1px solid var(--c-border);
-            border-radius: var(--radius);
-            overflow: hidden;
-            background: var(--c-surface);
-            transition: box-shadow 0.2s;
+            border: 1px solid var(--c-border); border-radius: var(--radius);
+            overflow: hidden; background: var(--c-surface);
+            transition: box-shadow 0.2s, background 0.3s, border-color 0.3s;
         }
         .acc:hover { box-shadow: var(--shadow-sm); }
-
         .acc-head {
-            display: flex; align-items: center; gap: 0.6rem;
-            padding: 0.6rem 0.85rem;
+            display: flex; align-items: center; gap: 0.55rem;
+            padding: 0.55rem 0.8rem;
             cursor: pointer; user-select: none;
-            background: var(--c-bg);
+            background: var(--c-surface-2);
             transition: background 0.15s;
-            border: none; width: 100%; text-align: left;
+            border: none; width: 100%; text-align: left; color: var(--c-text);
         }
-        .acc-head:hover { background: #e8edf4; }
-
+        .acc-head:hover { background: var(--c-bg); }
         .acc-num {
-            width: 18px; height: 18px;
+            width: 17px; height: 17px;
             background: var(--c-accent); color: white;
-            border-radius: 50%; font-size: 0.6rem; font-weight: 700;
+            border-radius: 50%; font-size: 0.58rem; font-weight: 700;
             display: flex; align-items: center; justify-content: center; flex-shrink: 0;
         }
-
         .acc-title {
-            font-size: 0.72rem; font-weight: 600;
+            font-size: 0.71rem; font-weight: 600;
             color: var(--c-text); text-transform: uppercase;
             letter-spacing: 0.05em; flex: 1;
         }
-
         .acc-chevron { color: var(--c-muted); transition: transform 0.2s ease; flex-shrink: 0; }
         .acc.open .acc-chevron { transform: rotate(180deg); }
+        .acc-body { max-height: 0; overflow: hidden; transition: max-height 0.28s ease; }
+        .acc.open .acc-body { max-height: 1000px; border-top: 1px solid var(--c-border); }
+        .acc-inner { padding: 0.8rem; }
 
-        .acc-body {
-            max-height: 0; overflow: hidden;
-            transition: max-height 0.25s ease;
-            border-top: 0px solid var(--c-border);
-        }
-        .acc.open .acc-body { max-height: 700px; border-top-width: 1px; }
+        .hint { font-size: 0.71rem; color: var(--c-muted); line-height: 1.5; margin-bottom: 0.6rem; }
 
-        .acc-inner { padding: 0.85rem; }
-
-        .hint { font-size: 0.72rem; color: var(--c-muted); line-height: 1.45; margin-bottom: 0.6rem; }
-
-        /* ── BUTTONS ── */
+        /* ── BUTTONS ────────────────────────────────────────────────── */
         .btn {
             width: 100%; padding: 0.48rem 0.85rem;
             border-radius: var(--radius); border: 1px solid transparent;
-            font-family: inherit; font-size: 0.78rem; font-weight: 500;
+            font-family: inherit; font-size: 0.77rem; font-weight: 500;
             cursor: pointer; transition: all 0.15s ease;
             display: flex; align-items: center; justify-content: center;
             gap: 0.4rem; letter-spacing: 0.01em;
         }
-
         .btn-primary {
             background: var(--c-surface); color: var(--c-text);
             border-color: var(--c-border); box-shadow: var(--shadow-sm);
         }
         .btn-primary:hover { background: var(--c-bg); border-color: var(--c-border-hover); }
-
         .btn-action {
             background: var(--c-accent); color: white;
-            box-shadow: 0 1px 3px rgba(37,99,235,0.3);
+            box-shadow: 0 1px 4px rgba(37,99,235,0.35);
         }
         .btn-action:hover:not(:disabled) {
             background: var(--c-accent-hover);
-            box-shadow: 0 2px 8px rgba(37,99,235,0.4);
+            box-shadow: 0 3px 10px rgba(37,99,235,0.45);
             transform: translateY(-1px);
         }
-        .btn-action:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-
+        .btn-action:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
         .btn-ghost {
             background: transparent; color: var(--c-muted);
-            border-color: var(--c-border); font-size: 0.74rem;
+            border-color: var(--c-border); font-size: 0.73rem;
         }
         .btn-ghost:hover { background: var(--c-bg); color: var(--c-text); }
-
         .btn-heatmap {
             background: linear-gradient(135deg, #064e3b, #059669);
-            color: white; border: none;
-            box-shadow: 0 1px 4px rgba(5,150,105,0.3);
+            color: white; border: none; box-shadow: 0 1px 4px rgba(5,150,105,0.3);
         }
         .btn-heatmap:hover { opacity: 0.9; transform: translateY(-1px); }
-
         .btn-compare {
             background: linear-gradient(135deg, #4c1d95, #9333ea);
-            color: white; border: none;
-            box-shadow: 0 1px 4px rgba(147,51,234,0.3);
+            color: white; border: none; box-shadow: 0 1px 4px rgba(147,51,234,0.3);
         }
-        .btn-compare:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 2px 8px rgba(147,51,234,0.4); }
+        .btn-compare:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); }
         .btn-compare:disabled { opacity: 0.35; cursor: not-allowed; }
+        .btn-sm { width: auto; padding: 0.28rem 0.6rem; font-size: 0.71rem; }
+        .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem; }
+        .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.35rem; }
 
-        .btn-sm { width: auto; padding: 0.3rem 0.65rem; font-size: 0.72rem; }
-
-        /* ── RADIO CARDS ── */
-        .card-grid { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 0.6rem; }
-
+        /* ── RADIO CARDS ────────────────────────────────────────────── */
+        .card-grid { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.55rem; }
         .radio-card { position: relative; cursor: pointer; display: block; }
         .radio-card input { position: absolute; opacity: 0; pointer-events: none; }
-
         .radio-body {
-            border: 1.5px solid var(--c-border);
-            border-radius: 6px; padding: 0.42rem 0.75rem;
+            border: 1.5px solid var(--c-border); border-radius: 6px; padding: 0.4rem 0.7rem;
             background: var(--c-surface);
             transition: border-color 0.15s, background 0.15s;
-            display: flex; align-items: center; gap: 0.55rem;
+            display: flex; align-items: center; gap: 0.5rem;
         }
-
         .radio-dot {
-            width: 13px; height: 13px;
-            border: 2px solid var(--c-border-hover); border-radius: 50%;
-            flex-shrink: 0; position: relative; transition: border-color 0.15s;
+            width: 12px; height: 12px; border: 2px solid var(--c-border-hover);
+            border-radius: 50%; flex-shrink: 0; position: relative; transition: border-color 0.15s;
         }
         .radio-dot::after {
             content: ''; position: absolute; inset: 2px;
-            background: var(--c-accent); border-radius: 50%;
-            opacity: 0; transition: opacity 0.15s;
+            background: var(--c-accent); border-radius: 50%; opacity: 0; transition: opacity 0.15s;
         }
-
         .radio-card:hover .radio-body { border-color: #93c5fd; background: var(--c-bg); }
         .radio-card input:checked + .radio-body {
-            border-color: var(--c-accent);
-            background: var(--c-accent-light);
-            box-shadow: 0 0 0 1px rgba(37,99,235,0.25);
+            border-color: var(--c-accent); background: var(--c-accent-light);
+            box-shadow: 0 0 0 2px rgba(37,99,235,0.15);
         }
         .radio-card input:checked + .radio-body .radio-dot { border-color: var(--c-accent); }
         .radio-card input:checked + .radio-body .radio-dot::after { opacity: 1; }
-
         .radio-info { flex: 1; }
-        .radio-title { font-size: 0.78rem; font-weight: 600; color: var(--c-text); display: block; }
+        .radio-title { font-size: 0.77rem; font-weight: 600; color: var(--c-text); display: block; }
         .radio-card input:checked + .radio-body .radio-title { color: var(--c-accent); }
-        .radio-desc  { font-size: 0.68rem; color: var(--c-muted); display: block; margin-top: 1px; }
+        .radio-desc  { font-size: 0.67rem; color: var(--c-muted); display: block; margin-top: 1px; }
+        .divider { height: 1px; background: var(--c-border); margin: 0.5rem 0; }
 
-        .divider { height: 1px; background: var(--c-border); margin: 0.55rem 0; }
-
-        /* ── COST INPUTS ── */
+        /* ── COST INPUTS ────────────────────────────────────────────── */
         .cost-row {
-            display: flex; align-items: center;
-            justify-content: space-between; padding: 0.3rem 0;
+            display: flex; align-items: center; justify-content: space-between; padding: 0.3rem 0;
         }
         .cost-row + .cost-row { border-top: 1px solid var(--c-border); }
-
-        .cost-label { font-size: 0.77rem; color: var(--c-text); font-weight: 500; display: block; }
-        .cost-unit  { font-size: 0.66rem; color: var(--c-muted); display: block; }
-
+        .cost-label { font-size: 0.76rem; color: var(--c-text); font-weight: 500; display: block; }
+        .cost-unit  { font-size: 0.65rem; color: var(--c-muted); display: block; }
         .cost-input {
-            width: 70px; padding: 0.27rem 0.45rem;
+            width: 72px; padding: 0.26rem 0.45rem;
             border: 1px solid var(--c-border); border-radius: 5px;
-            font-size: 0.78rem; font-family: inherit;
+            font-size: 0.77rem; font-family: inherit;
             text-align: right; color: var(--c-text);
             background: var(--c-surface); outline: none;
             transition: border-color 0.15s, box-shadow 0.15s;
         }
-        .cost-input:focus { border-color: var(--c-accent); box-shadow: 0 0 0 2px rgba(37,99,235,0.1); }
+        .cost-input:focus { border-color: var(--c-accent); box-shadow: 0 0 0 2px rgba(37,99,235,0.12); }
+        .slider-row { display: flex; align-items: center; justify-content: space-between; gap: 0.55rem; margin-top: 0.5rem; }
+        .slider-label { font-size: 0.74rem; color: var(--c-text); font-weight: 500; white-space: nowrap; }
+        .slider-val   { font-size: 0.71rem; color: var(--c-accent); font-weight: 600; white-space: nowrap; min-width: 42px; text-align: right; }
+        input[type=range] { flex: 1; accent-color: var(--c-accent); cursor: pointer; }
 
-        /* ── COVERAGE SLIDER ── */
-        .slider-row {
-            display: flex; align-items: center;
-            justify-content: space-between; gap: 0.6rem; margin-top: 0.5rem;
-        }
-        .slider-label { font-size: 0.75rem; color: var(--c-text); font-weight: 500; white-space: nowrap; }
-        .slider-val   { font-size: 0.72rem; color: var(--c-accent); font-weight: 600; white-space: nowrap; min-width: 40px; text-align: right; }
-        input[type=range] {
-            flex: 1; accent-color: var(--c-accent); cursor: pointer;
-        }
+        /* ── LEGEND ─────────────────────────────────────────────────── */
+        .legend-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.28rem 0.55rem; margin-top: 0.4rem; }
+        .legend-item { display: flex; align-items: center; gap: 0.32rem; font-size: 0.68rem; color: var(--c-muted); }
+        .legend-dot  { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
 
-        /* ── LEGEND ── */
-        .legend-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.3rem 0.6rem; margin-top: 0.4rem; }
-        .legend-item { display: flex; align-items: center; gap: 0.35rem; font-size: 0.7rem; color: var(--c-muted); }
-        .legend-dot  { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
-
-        /* ── STATUS ── */
-        #route-status {
-            font-size: 0.72rem; text-align: center;
-            min-height: 1rem; color: var(--c-muted); margin-top: 0.4rem;
-        }
+        /* ── STATUS ─────────────────────────────────────────────────── */
+        #route-status { font-size: 0.72rem; text-align: center; min-height: 1rem; color: var(--c-muted); margin-top: 0.35rem; }
         .status-success { color: var(--c-success) !important; }
         .status-error   { color: var(--c-danger)  !important; }
         .status-working { color: var(--c-warning)  !important; }
 
-        /* ── MAP ── */
+        /* ── MAP ─────────────────────────────────────────────────────── */
         #map-wrap { flex: 1; position: relative; overflow: hidden; }
         #map { position: absolute; inset: 0; width: 100%; height: 100%; background: #dde5ed; }
 
-        .leaflet-control-attribution { font-size: 0.65rem !important; }
-        .leaflet-control-zoom a { font-size: 14px !important; line-height: 26px !important; }
+        /* ── MAP TOOLBAR ────────────────────────────────────────────── */
+        #map-toolbar {
+            position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+            z-index: 800;
+            display: flex; gap: 0.4rem;
+            background: var(--c-surface); border: 1px solid var(--c-border);
+            border-radius: 10px; padding: 0.3rem 0.5rem;
+            box-shadow: var(--shadow-md);
+        }
+        .map-tool-btn {
+            width: 32px; height: 32px; border-radius: 7px; border: none;
+            background: transparent; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            color: var(--c-muted); font-size: 0.85rem;
+            transition: background 0.15s, color 0.15s;
+            title: '';
+        }
+        .map-tool-btn:hover { background: var(--c-bg); color: var(--c-accent); }
+        .map-tool-divider { width: 1px; background: var(--c-border); margin: 0.2rem 0; align-self: stretch; }
 
-        /* Node markers */
-        .node-isp    { width:16px;height:16px;background:#2563eb;border:2.5px solid white;border-radius:50%;box-shadow:0 2px 6px rgba(37,99,235,0.5); }
-        .node-hub    { width:14px;height:14px;background:#7c3aed;border:2.5px solid white;border-radius:50%;box-shadow:0 2px 6px rgba(124,58,237,0.5); }
-        .node-client { width:12px;height:12px;background:#059669;border:2px solid white;border-radius:50%;box-shadow:0 2px 4px rgba(5,150,105,0.5); }
+        /* ── NODE MARKERS ───────────────────────────────────────────── */
+        .node-marker { border-radius: 50% !important; }
+        .node-isp    { width:18px!important;height:18px!important;background:#2563eb;border:2.5px solid white;border-radius:50%;box-shadow:0 2px 8px rgba(37,99,235,0.5); }
+        .node-hub    { width:16px!important;height:16px!important;background:#7c3aed;border:2.5px solid white;border-radius:50%;box-shadow:0 2px 8px rgba(124,58,237,0.5); }
+        .node-client { width:13px!important;height:13px!important;background:#059669;border:2px solid white;border-radius:50%;box-shadow:0 2px 6px rgba(5,150,105,0.5); }
 
-        /* ── HISTORY SIDEBAR ── */
+        /* ── NODE LABELS ─────────────────────────────────────────────── */
+        .node-label {
+            background: rgba(15,23,42,0.78) !important;
+            border: none !important; color: white !important;
+            font-size: 0.65rem !important; font-weight: 600 !important;
+            padding: 2px 6px !important; border-radius: 4px !important;
+            white-space: nowrap !important;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.3) !important;
+        }
+        .node-label-isp    { background: rgba(37,99,235,0.88)  !important; }
+        .node-label-hub    { background: rgba(124,58,237,0.88) !important; }
+        .node-label-client { background: rgba(5,150,105,0.88)  !important; }
+        [data-theme="dark"] .node-label { background: rgba(255,255,255,0.15) !important; }
+
+        /* ── CONTEXT MENU ─────────────────────────────────────────────── */
+        .map-ctx-menu {
+            position: fixed; z-index: 9998;
+            background: var(--c-surface);
+            border: 1px solid var(--c-border);
+            border-radius: 10px;
+            box-shadow: var(--shadow-lg);
+            min-width: 170px; padding: 0.4rem;
+            font-family: 'Inter', sans-serif;
+        }
+        .ctx-header {
+            display: flex; align-items: center; gap: 0.5rem;
+            padding: 0.45rem 0.6rem 0.4rem;
+            font-size: 0.76rem; font-weight: 600; color: var(--c-text);
+            border-bottom: 1px solid var(--c-border); margin-bottom: 0.3rem;
+        }
+        .ctx-dot {
+            width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+        }
+        .ctx-dot-isp    { background: #2563eb; }
+        .ctx-dot-hub    { background: #7c3aed; }
+        .ctx-dot-client { background: #059669; }
+        .ctx-item {
+            display: block; width: 100%;
+            padding: 0.4rem 0.6rem; text-align: left;
+            background: transparent; border: none; border-radius: 6px;
+            font-size: 0.77rem; font-family: inherit; cursor: pointer;
+            color: var(--c-text); transition: background 0.12s;
+        }
+        .ctx-item:hover { background: var(--c-bg); }
+
+        /* ── BOM STYLES (used by ui.js innerHTML) ─────────────────────── */
+        .bom-section-label {
+            font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.07em; color: var(--c-muted); margin-bottom: 0.55rem;
+        }
+        .bom-table { width:100%; border-collapse:collapse; font-size:0.77rem; }
+        .bom-th {
+            padding:0.3rem 0; text-align:left; font-weight:600;
+            color:var(--c-muted); border-bottom:2px solid var(--c-border);
+        }
+        .bom-th:not(:first-child) { text-align:right; }
+        .bom-table tbody tr { border-bottom:1px solid var(--c-border); }
+        .bom-td-label { padding:0.4rem 0; color:var(--c-muted); }
+        .bom-sub { font-size:0.66rem; color:var(--c-muted); }
+        .bom-td-val { padding:0.4rem 0; text-align:right; font-weight:500; }
+        .bom-winner { color:var(--c-success)!important; font-weight:700!important; }
+        .bom-total-row td { padding:0.55rem 0; border-top:2px solid var(--c-border)!important; }
+
+        .bom-metrics {
+            display:grid; grid-template-columns:repeat(3,1fr); gap:0.4rem;
+            margin:0.6rem 0;
+        }
+        .bom-metric {
+            background:var(--c-surface-2); border:1px solid var(--c-border);
+            border-radius:8px; padding:0.5rem; text-align:center;
+        }
+        .bom-metric-val   { font-size:0.88rem; font-weight:700; color:var(--c-text); }
+        .bom-metric-label { font-size:0.62rem; color:var(--c-muted); margin-top:2px; }
+
+        .bom-alert { padding:0.65rem; border-radius:8px; margin:0.6rem 0; }
+        .bom-alert-danger { background:#fef2f2; border:1.5px solid #fca5a5; }
+        .bom-alert-danger strong { font-size:0.74rem; color:#dc2626; display:block; margin-bottom:0.25rem; }
+        .bom-alert-danger p { font-size:0.71rem; color:#991b1b; line-height:1.4; }
+        [data-theme="dark"] .bom-alert-danger { background:#2d1515; border-color:#7f1d1d; }
+        [data-theme="dark"] .bom-alert-danger strong { color:#f87171; }
+        [data-theme="dark"] .bom-alert-danger p { color:#fca5a5; }
+
+        .bom-analysis {
+            padding:0.65rem; border:1.5px solid; border-radius:8px; margin-top:0.6rem;
+        }
+        .bom-analysis-label { font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:0.3rem; }
+        .bom-analysis-text  { font-size:0.71rem; color:var(--c-text); line-height:1.5; }
+
+        .savings-badge {
+            margin-top:0.6rem; padding:0.55rem 0.75rem;
+            background:linear-gradient(135deg, #ecfdf5, #d1fae5);
+            border:1.5px solid #86efac; border-radius:8px;
+            font-size:0.77rem; color:#065f46; font-weight:500; text-align:center;
+        }
+        [data-theme="dark"] .savings-badge { background:linear-gradient(135deg, #052e16, #064e3b); border-color:#065f46; color:#6ee7b7; }
+
+        /* ── HISTORY DRAWER ─────────────────────────────────────────── */
         #history-btn {
             position: absolute; top: 14px; right: 14px; z-index: 800;
-            background: white; border: 1px solid var(--c-border);
+            background: var(--c-surface); border: 1px solid var(--c-border);
             border-radius: var(--radius); width: 36px; height: 36px;
             cursor: pointer; display: flex; align-items: center; justify-content: center;
-            box-shadow: var(--shadow-md); transition: background 0.15s, border-color 0.15s;
+            box-shadow: var(--shadow-md); transition: all 0.15s;
             color: var(--c-text);
         }
-        #history-btn:hover { background: var(--c-bg); border-color: var(--c-border-hover); box-shadow: var(--shadow-lg); }
-
+        #history-btn:hover { background: var(--c-bg); box-shadow: var(--shadow-lg); }
         #history-drawer {
-            position: absolute; top: 0; right: 0; width: 300px; height: 100%;
+            position: absolute; top: 0; right: 0; width: 310px; height: 100%;
             background: var(--c-surface); border-left: 1px solid var(--c-border);
             box-shadow: var(--shadow-lg); z-index: 900;
             display: flex; flex-direction: column;
             transform: translateX(100%); transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
         }
         #history-drawer.open { transform: translateX(0); }
-
         #drawer-head {
             display: flex; align-items: center; justify-content: space-between;
             padding: 1rem 1.25rem; border-bottom: 1px solid var(--c-border); flex-shrink: 0;
         }
-        #drawer-head h2 { font-size: 0.85rem; font-weight: 600; color: var(--c-text); }
-        #drawer-head p  { font-size: 0.7rem; color: var(--c-muted); margin-top: 1px; }
-
+        #drawer-head h2 { font-size: 0.85rem; font-weight: 700; color: var(--c-text); }
+        #drawer-head p  { font-size: 0.69rem; color: var(--c-muted); margin-top: 1px; }
         #close-drawer {
             background: none; border: none; width: 28px; height: 28px;
             cursor: pointer; border-radius: 6px; color: var(--c-muted);
@@ -329,236 +468,260 @@
             transition: background 0.15s, color 0.15s;
         }
         #close-drawer:hover { background: var(--c-bg); color: var(--c-text); }
-
         #history-list {
-            flex: 1; overflow-y: auto; padding: 1rem;
-            display: flex; flex-direction: column; gap: 0.5rem;
+            flex: 1; overflow-y: auto; padding: 0.8rem;
+            display: flex; flex-direction: column; gap: 0.45rem;
         }
         #history-list::-webkit-scrollbar { width: 4px; }
         #history-list::-webkit-scrollbar-thumb { background: var(--c-border); border-radius: 99px; }
-
-        .history-empty { text-align: center; padding: 2rem 1rem; color: var(--c-muted); font-size: 0.78rem; }
-
+        .history-empty { text-align: center; padding: 2rem 1rem; color: var(--c-muted); font-size: 0.77rem; line-height: 1.6; }
         .history-item {
-            padding: 0.65rem 0.85rem;
-            border: 1.5px solid var(--c-border); border-radius: var(--radius);
-            cursor: pointer; transition: all 0.15s ease; background: var(--c-surface);
+            padding: 0.6rem 0.8rem; border: 1.5px solid var(--c-border);
+            border-radius: var(--radius); cursor: pointer;
+            transition: all 0.15s ease; background: var(--c-surface);
         }
         .history-item:hover { border-color: var(--c-accent); background: var(--c-accent-light); }
+        .h-title { font-size: 0.77rem; font-weight: 600; color: var(--c-text); }
+        .h-date  { font-size: 0.67rem; color: var(--c-muted); margin-top: 2px; }
+        .h-meta  { display: flex; gap: 0.45rem; margin-top: 4px; flex-wrap: wrap; }
+        .h-tag   { font-size: 0.64rem; background: var(--c-bg); border: 1px solid var(--c-border); border-radius: 4px; padding: 1px 5px; color: var(--c-muted); }
+        .h-delete-btn {
+            background: none; border: none; cursor: pointer; padding: 2px 5px;
+            color: var(--c-muted); font-size: 1rem; border-radius: 4px;
+            line-height: 1; flex-shrink: 0; transition: background 0.12s, color 0.12s;
+        }
+        .h-delete-btn:hover { background: #fef2f2; color: #dc2626; }
 
-        .h-title { font-size: 0.78rem; font-weight: 600; color: var(--c-text); text-transform: capitalize; }
-        .h-date  { font-size: 0.68rem; color: var(--c-muted); margin-top: 2px; }
-        .h-meta  { display: flex; gap: 0.5rem; margin-top: 4px; }
-        .h-tag   { font-size: 0.65rem; background: var(--c-bg); border: 1px solid var(--c-border); border-radius: 4px; padding: 1px 5px; color: var(--c-muted); }
-
-        /* Map info chip */
-        #map-info-chip {
-            position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
-            background: rgba(255,255,255,0.92); backdrop-filter: blur(8px);
-            border: 1px solid var(--c-border); border-radius: 99px;
-            padding: 0.4rem 1rem; font-size: 0.7rem; color: var(--c-muted);
-            z-index: 700; box-shadow: var(--shadow-sm); pointer-events: none;
+        /* ── NODE COUNT BADGE ─────────────────────────────────────────── */
+        .node-badge {
+            display: inline-flex; align-items: center; justify-content: center;
+            min-width: 18px; height: 18px; padding: 0 4px;
+            background: var(--c-accent-light); color: var(--c-accent);
+            border: 1px solid var(--c-accent-border); border-radius: 99px;
+            font-size: 0.65rem; font-weight: 700;
         }
 
-        /* Enterprise badge */
+        /* ── ENTERPRISE BADGE ─────────────────────────────────────────── */
         .ent-badge {
-            display: inline-flex; align-items: center; gap: 0.25rem;
-            font-size: 0.6rem; font-weight: 700; text-transform: uppercase;
+            display: inline-flex; align-items: center; gap: 0.2rem;
+            font-size: 0.58rem; font-weight: 700; text-transform: uppercase;
             letter-spacing: 0.07em; color: white;
             background: linear-gradient(135deg, #9333ea, #7c3aed);
             border-radius: 4px; padding: 2px 5px; margin-left: 0.3rem; vertical-align: middle;
         }
 
-        .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem; }
+        /* ── MAP INFO CHIP ─────────────────────────────────────────────── */
+        #map-info-chip {
+            position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+            background: rgba(255,255,255,0.92); backdrop-filter: blur(8px);
+            border: 1px solid var(--c-border); border-radius: 99px;
+            padding: 0.38rem 1rem; font-size: 0.69rem; color: var(--c-muted);
+            z-index: 700; box-shadow: var(--shadow-sm); pointer-events: none;
+        }
+        [data-theme="dark"] #map-info-chip { background: rgba(30,41,59,0.92); }
+
+        /* ── KEYBOARD SHORTCUT CHIP ─────────────────────────────────── */
+        .kbd { 
+            display: inline-block; padding: 0 4px; border: 1px solid var(--c-border); 
+            border-radius: 3px; font-size: 0.62rem; font-family: monospace;
+            background: var(--c-surface-2); color: var(--c-muted); line-height: 1.5;
+        }
+
+        /* ── LEAFLET OVERRIDES ──────────────────────────────────────── */
+        .leaflet-control-attribution { font-size: 0.65rem !important; }
+        .leaflet-control-zoom a { font-size: 14px !important; line-height: 26px !important; }
+        .leaflet-control-layers { border-radius: 8px !important; border: 1px solid var(--c-border) !important; box-shadow: var(--shadow-md) !important; }
     </style>
 </head>
 <body>
 <div id="app">
-    <!-- ── LEFT PANEL ── -->
+    <!-- ── LEFT PANEL ──────────────────────────────────────────────── -->
     <aside id="panel">
         <div id="panel-header">
-            <div class="logo">
-                <div class="logo-icon">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
+            <div class="header-top">
+                <div class="logo">
+                    <div class="logo-icon">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
+                    </div>
+                    <div>
+                        <h1>FiberPath Pro</h1>
+                        <div class="header-sub">Optical Network Planner</div>
+                    </div>
                 </div>
-                <h1>FiberPath Pro</h1>
+                <div class="header-actions">
+                    <button class="icon-btn" id="btn-dark-toggle" title="Toggle dark mode (D)">🌙</button>
+                    <button class="icon-btn" id="btn-save-project" title="Save project as JSON">💾</button>
+                    <button class="icon-btn" id="btn-load-project" title="Load project JSON">📂</button>
+                </div>
+                <input type="file" id="project-file-input" accept=".json" style="display:none;">
             </div>
-            <p>Weighted Obstacle Routing Engine</p>
+
+            <!-- Geocoding search -->
+            <div class="geocode-wrap">
+                <svg class="geocode-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input id="geocode-input" type="text" placeholder="Search city or address… (G)">
+                <div id="geocode-results"></div>
+            </div>
         </div>
 
         <div id="panel-body">
 
-            <!-- 1. Map Setup -->
+            <!-- 1. Map Data & Obstacles -->
             <div class="acc open" id="acc-1">
                 <button class="acc-head" onclick="toggleAcc('acc-1')">
                     <span class="acc-num">1</span>
-                    <span class="acc-title">Map Data & Obstacles</span>
-                    <svg class="acc-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    <span class="acc-title">Map Data &amp; Obstacles</span>
+                    <svg class="acc-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
                 </button>
-                <div class="acc-body">
-                    <div class="acc-inner">
-                        <p class="hint">Fetch real buildings, water and roads from OSM. These are rasterized into a weighted grid — buildings/water are blocked (0), roads are preferred (0.7×).</p>
-                        <button class="btn btn-primary" id="btn-fetch-obstacles">
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg>
-                            Fetch Obstacles from OSM
-                        </button>
-                        <div id="obstacle-status" style="font-size:0.7rem;color:var(--c-muted);text-align:center;margin-top:0.4rem;">Ready</div>
-
-                        <div class="divider"></div>
-
-                        <button class="btn btn-heatmap" id="btn-heatmap">
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-                            Toggle Terrain Heatmap
-                        </button>
-
-                        <div class="legend-grid" style="margin-top:0.5rem;">
-                            <div class="legend-item"><div class="legend-dot" style="background:#b00000;"></div>Blocked (building/water)</div>
-                            <div class="legend-item"><div class="legend-dot" style="background:#ff5000;"></div>Building edge buffer</div>
-                            <div class="legend-item"><div class="legend-dot" style="background:#22c55e;"></div>Road (preferred)</div>
-                            <div class="legend-item"><div class="legend-dot" style="background:#e2e8f0;"></div>Open land</div>
-                        </div>
+                <div class="acc-body"><div class="acc-inner">
+                    <p class="hint">Fetch real buildings, water and roads from OpenStreetMap. These are rasterized into a 100×100 weighted grid — buildings/water are blocked, roads preferred. <span class="kbd">F</span> to fetch.</p>
+                    <button class="btn btn-primary" id="btn-fetch-obstacles">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg>
+                        Fetch Obstacles from OSM
+                    </button>
+                    <div id="obstacle-status" style="font-size:0.68rem;color:var(--c-muted);text-align:center;margin-top:0.4rem;">Ready</div>
+                    <div class="divider"></div>
+                    <button class="btn btn-heatmap" id="btn-heatmap">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                        Toggle Terrain Heatmap <span class="kbd" style="color:rgba(255,255,255,0.7);border-color:rgba(255,255,255,0.3);">H</span>
+                    </button>
+                    <div class="legend-grid" style="margin-top:0.5rem;">
+                        <div class="legend-item"><div class="legend-dot" style="background:#b00000;"></div>Blocked (bldg/water)</div>
+                        <div class="legend-item"><div class="legend-dot" style="background:#ff5000;"></div>Building edge buffer</div>
+                        <div class="legend-item"><div class="legend-dot" style="background:#22c55e;"></div>Road (preferred)</div>
+                        <div class="legend-item"><div class="legend-dot" style="background:var(--c-border);"></div>Open land</div>
                     </div>
-                </div>
+                </div></div>
             </div>
 
-            <!-- 2. Node Placement -->
+            <!-- 2. Place Nodes -->
             <div class="acc open" id="acc-2">
                 <button class="acc-head" onclick="toggleAcc('acc-2')">
                     <span class="acc-num">2</span>
-                    <span class="acc-title">Place Nodes</span>
-                    <svg class="acc-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    <span class="acc-title">Place Nodes <span class="node-badge" id="node-count-badge">0</span></span>
+                    <svg class="acc-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
                 </button>
-                <div class="acc-body">
-                    <div class="acc-inner">
-                        <p class="hint">Select a type, then click on the map to place it. ISP = source, Hub = splitter, Client = endpoint.</p>
-                        <div class="card-grid">
-                            <label class="radio-card">
-                                <input type="radio" name="nodeType" value="isp" checked>
-                                <div class="radio-body">
-                                    <span class="radio-dot"></span>
-                                    <div class="radio-info">
-                                        <span class="radio-title">ISP Main Node</span>
-                                        <span class="radio-desc">Primary datacenter / central office</span>
-                                    </div>
-                                    <div style="width:10px;height:10px;background:#2563eb;border-radius:50%;border:2px solid white;box-shadow:0 1px 4px rgba(37,99,235,0.5);flex-shrink:0;"></div>
+                <div class="acc-body"><div class="acc-inner">
+                    <p class="hint">Select type → click map to place. Right-click a node to rename or delete. Nodes are <strong>draggable</strong>. <span class="kbd">Ctrl+Z</span> to undo.</p>
+                    <div class="card-grid">
+                        <label class="radio-card">
+                            <input type="radio" name="nodeType" value="isp" checked>
+                            <div class="radio-body">
+                                <span class="radio-dot"></span>
+                                <div class="radio-info">
+                                    <span class="radio-title">ISP Main Node</span>
+                                    <span class="radio-desc">Primary datacenter / central office</span>
                                 </div>
-                            </label>
-                            <label class="radio-card">
-                                <input type="radio" name="nodeType" value="hub">
-                                <div class="radio-body">
-                                    <span class="radio-dot"></span>
-                                    <div class="radio-info">
-                                        <span class="radio-title">Splitter Hub</span>
-                                        <span class="radio-desc">Optical distribution point (1×8)</span>
-                                    </div>
-                                    <div style="width:10px;height:10px;background:#7c3aed;border-radius:50%;border:2px solid white;box-shadow:0 1px 4px rgba(124,58,237,0.5);flex-shrink:0;"></div>
+                                <div style="width:10px;height:10px;background:#2563eb;border-radius:50%;border:2px solid white;box-shadow:0 1px 4px rgba(37,99,235,0.5);flex-shrink:0;"></div>
+                            </div>
+                        </label>
+                        <label class="radio-card">
+                            <input type="radio" name="nodeType" value="hub">
+                            <div class="radio-body">
+                                <span class="radio-dot"></span>
+                                <div class="radio-info">
+                                    <span class="radio-title">Splitter Hub</span>
+                                    <span class="radio-desc">Optical distribution point (1×8)</span>
                                 </div>
-                            </label>
-                            <label class="radio-card">
-                                <input type="radio" name="nodeType" value="client">
-                                <div class="radio-body">
-                                    <span class="radio-dot"></span>
-                                    <div class="radio-info">
-                                        <span class="radio-title">Client Premises</span>
-                                        <span class="radio-desc">End-user connection point</span>
-                                    </div>
-                                    <div style="width:10px;height:10px;background:#059669;border-radius:50%;border:2px solid white;box-shadow:0 1px 4px rgba(5,150,105,0.5);flex-shrink:0;"></div>
+                                <div style="width:10px;height:10px;background:#7c3aed;border-radius:50%;border:2px solid white;box-shadow:0 1px 4px rgba(124,58,237,0.5);flex-shrink:0;"></div>
+                            </div>
+                        </label>
+                        <label class="radio-card">
+                            <input type="radio" name="nodeType" value="client">
+                            <div class="radio-body">
+                                <span class="radio-dot"></span>
+                                <div class="radio-info">
+                                    <span class="radio-title">Client Premises</span>
+                                    <span class="radio-desc">End-user connection point</span>
                                 </div>
-                            </label>
-                        </div>
-                        <button class="btn btn-ghost" id="btn-clear-nodes">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg>
-                            Clear All Nodes &amp; Routes
-                        </button>
+                                <div style="width:10px;height:10px;background:#059669;border-radius:50%;border:2px solid white;box-shadow:0 1px 4px rgba(5,150,105,0.5);flex-shrink:0;"></div>
+                            </div>
+                        </label>
                     </div>
-                </div>
+                    <button class="btn btn-ghost" id="btn-clear-nodes">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg>
+                        Clear All Nodes &amp; Routes
+                    </button>
+                </div></div>
             </div>
 
-            <!-- 3. Budget -->
+            <!-- 3. Budget Parameters -->
             <div class="acc open" id="acc-3">
                 <button class="acc-head" onclick="toggleAcc('acc-3')">
                     <span class="acc-num">3</span>
                     <span class="acc-title">Budget Parameters</span>
-                    <svg class="acc-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    <svg class="acc-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
                 </button>
-                <div class="acc-body">
-                    <div class="acc-inner">
-                        <div class="cost-row">
-                            <div><span class="cost-label">Fiber Cable</span><span class="cost-unit">$ per meter</span></div>
-                            <input class="cost-input" type="number" id="cost-fiber" value="2.50" step="0.10" min="0">
-                        </div>
-                        <div class="cost-row">
-                            <div><span class="cost-label">Splitter Hub</span><span class="cost-unit">$ per unit</span></div>
-                            <input class="cost-input" type="number" id="cost-hub" value="500" step="50" min="0">
-                        </div>
-                        <div class="cost-row">
-                            <div><span class="cost-label">Client Drop</span><span class="cost-unit">$ per termination</span></div>
-                            <input class="cost-input" type="number" id="cost-client" value="150" step="10" min="0">
-                        </div>
-
-                        <div class="divider"></div>
-
-                        <!-- Coverage radius slider -->
-                        <div class="slider-row">
-                            <span class="slider-label">Hub Coverage Radius</span>
-                            <span class="slider-val" id="coverage-val">300 m</span>
-                        </div>
-                        <input type="range" id="coverage-radius" min="100" max="1000" step="50" value="300"
-                               oninput="document.getElementById('coverage-val').textContent=this.value+' m'"
-                               style="width:100%;margin-top:0.3rem;">
+                <div class="acc-body"><div class="acc-inner">
+                    <div class="cost-row">
+                        <div><span class="cost-label">Fiber Cable</span><span class="cost-unit">$ per metre</span></div>
+                        <input class="cost-input" type="number" id="cost-fiber" value="2.50" step="0.10" min="0">
                     </div>
-                </div>
+                    <div class="cost-row">
+                        <div><span class="cost-label">Splitter Hub</span><span class="cost-unit">$ per unit</span></div>
+                        <input class="cost-input" type="number" id="cost-hub" value="500" step="50" min="0">
+                    </div>
+                    <div class="cost-row">
+                        <div><span class="cost-label">Client Drop</span><span class="cost-unit">$ per termination</span></div>
+                        <input class="cost-input" type="number" id="cost-client" value="150" step="10" min="0">
+                    </div>
+                    <div class="divider"></div>
+                    <div class="slider-row">
+                        <span class="slider-label">Hub Coverage Radius</span>
+                        <span class="slider-val" id="coverage-val">300 m</span>
+                    </div>
+                    <input type="range" id="coverage-radius" min="100" max="1000" step="50" value="300"
+                           oninput="document.getElementById('coverage-val').textContent=this.value+' m'"
+                           style="width:100%;margin-top:0.3rem;">
+                </div></div>
             </div>
 
-            <!-- 4. Algorithm + Calculate -->
+            <!-- 4. Routing Algorithm -->
             <div class="acc open" id="acc-4">
                 <button class="acc-head" onclick="toggleAcc('acc-4')">
                     <span class="acc-num">4</span>
                     <span class="acc-title">Routing Algorithm</span>
-                    <svg class="acc-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    <svg class="acc-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
                 </button>
-                <div class="acc-body">
-                    <div class="acc-inner">
-                        <div class="card-grid">
-                            <label class="radio-card">
-                                <input type="radio" name="algorithm" value="astar" checked>
-                                <div class="radio-body">
-                                    <span class="radio-dot"></span>
-                                    <div class="radio-info">
-                                        <span class="radio-title">A* Point-to-Point</span>
-                                        <span class="radio-desc">Optimal terrain-aware path per client</span>
-                                    </div>
+                <div class="acc-body"><div class="acc-inner">
+                    <div class="card-grid">
+                        <label class="radio-card">
+                            <input type="radio" name="algorithm" value="astar" checked>
+                            <div class="radio-body">
+                                <span class="radio-dot"></span>
+                                <div class="radio-info">
+                                    <span class="radio-title">A* Hub & Spoke</span>
+                                    <span class="radio-desc">Optimal terrain-aware path per client</span>
                                 </div>
-                            </label>
-                            <label class="radio-card">
-                                <input type="radio" name="algorithm" value="kruskal">
-                                <div class="radio-body">
-                                    <span class="radio-dot"></span>
-                                    <div class="radio-info">
-                                        <span class="radio-title">Kruskal's MST</span>
-                                        <span class="radio-desc">Minimum Spanning Tree — lowest CapEx</span>
-                                    </div>
+                            </div>
+                        </label>
+                        <label class="radio-card">
+                            <input type="radio" name="algorithm" value="kruskal">
+                            <div class="radio-body">
+                                <span class="radio-dot"></span>
+                                <div class="radio-info">
+                                    <span class="radio-title">Kruskal's MST</span>
+                                    <span class="radio-desc">Minimum Spanning Tree — lowest CapEx</span>
                                 </div>
-                            </label>
-                            <label class="radio-card">
-                                <input type="radio" name="algorithm" value="compare">
-                                <div class="radio-body">
-                                    <span class="radio-dot"></span>
-                                    <div class="radio-info">
-                                        <span class="radio-title">A/B Route Comparison <span class="ent-badge">Enterprise</span></span>
-                                        <span class="radio-desc">Run both simultaneously, compare costs</span>
-                                    </div>
+                            </div>
+                        </label>
+                        <label class="radio-card">
+                            <input type="radio" name="algorithm" value="compare">
+                            <div class="radio-body">
+                                <span class="radio-dot"></span>
+                                <div class="radio-info">
+                                    <span class="radio-title">A/B Comparison <span class="ent-badge">Enterprise</span></span>
+                                    <span class="radio-desc">Run both — compare cost &amp; loss side-by-side</span>
                                 </div>
-                            </label>
-                        </div>
-
-                        <button class="btn btn-action" id="btn-calculate" disabled>
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-                            Calculate Route
-                        </button>
-                        <div id="route-status"></div>
+                            </div>
+                        </label>
                     </div>
-                </div>
+                    <button class="btn btn-action" id="btn-calculate" disabled>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                        Calculate Route
+                    </button>
+                    <div id="route-status"></div>
+                </div></div>
             </div>
 
             <!-- 5. Results / BOM -->
@@ -566,32 +729,59 @@
                 <button class="acc-head" onclick="toggleAcc('acc-5')">
                     <span class="acc-num">5</span>
                     <span class="acc-title">Route Results &amp; BOM</span>
-                    <svg class="acc-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    <svg class="acc-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
                 </button>
-                <div class="acc-body">
-                    <div class="acc-inner">
-                        <div id="bom-content"></div>
-                        <button class="btn btn-ghost" id="btn-export" style="margin-top:0.65rem;">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                            Export as GeoJSON
+                <div class="acc-body"><div class="acc-inner">
+                    <div id="bom-content"></div>
+                    <div class="divider"></div>
+                    <div class="row-3" style="margin-top:0.45rem;">
+                        <button class="btn btn-ghost btn-sm" id="btn-export">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            GeoJSON
+                        </button>
+                        <button class="btn btn-ghost btn-sm" id="btn-export-csv">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                            CSV BOM
+                        </button>
+                        <button class="btn btn-ghost btn-sm" id="btn-fit-nodes">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+                            Fit Map
                         </button>
                     </div>
-                </div>
+                </div></div>
             </div>
 
+            <!-- Keyboard shortcuts hint -->
+            <div style="padding:0.5rem 0.3rem; font-size:0.64rem; color:var(--c-muted); line-height:2;">
+                <span class="kbd">F</span> Fetch OSM &nbsp;
+                <span class="kbd">H</span> Heatmap &nbsp;
+                <span class="kbd">Enter</span> Calculate &nbsp;
+                <span class="kbd">Ctrl+Z</span> Undo node &nbsp;
+                <span class="kbd">D</span> Dark mode &nbsp;
+                <span class="kbd">G</span> Search
+            </div>
         </div>
     </aside>
 
-    <!-- ── MAP ── -->
+    <!-- ── MAP AREA ─────────────────────────────────────────────────── -->
     <main id="map-wrap">
         <div id="map"></div>
 
-        <button id="history-btn" onclick="document.getElementById('history-drawer').classList.toggle('open')" title="Route History">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+        <!-- Floating map toolbar -->
+        <div id="map-toolbar">
+            <button class="map-tool-btn" id="btn-fit-nodes-map" title="Fit map to all nodes">⊞</button>
+            <div class="map-tool-divider"></div>
+            <button class="map-tool-btn" id="btn-heatmap-map" title="Toggle terrain heatmap (H)">🌡️</button>
+        </div>
+
+        <!-- History button -->
+        <button id="history-btn" title="Route History">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
         </button>
 
-        <div id="map-info-chip">Click on the map to place nodes &nbsp;·&nbsp; Koramangala, Bengaluru</div>
+        <div id="map-info-chip">Click map to place nodes &nbsp;·&nbsp; Right-click nodes to edit &nbsp;·&nbsp; Koramangala, Bengaluru</div>
 
+        <!-- History drawer -->
         <aside id="history-drawer">
             <div id="drawer-head">
                 <div>
@@ -599,7 +789,7 @@
                     <p>Saved network topologies</p>
                 </div>
                 <button id="close-drawer" onclick="document.getElementById('history-drawer').classList.remove('open')" title="Close">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                 </button>
             </div>
             <div id="history-list">
@@ -613,6 +803,15 @@
 function toggleAcc(id) {
     document.getElementById(id).classList.toggle('open');
 }
+// Sync map toolbar heatmap to panel heatmap button
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('btn-heatmap-map')?.addEventListener('click', () => {
+        document.getElementById('btn-heatmap')?.click();
+    });
+    document.getElementById('btn-fit-nodes-map')?.addEventListener('click', () => {
+        document.getElementById('btn-fit-nodes')?.click();
+    });
+});
 </script>
 <script type="module" src="js/app.js?v=11"></script>
 </body>
